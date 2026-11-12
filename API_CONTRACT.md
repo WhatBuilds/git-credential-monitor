@@ -9,8 +9,8 @@ Authorization: Bearer <configured-token>
 Idempotency-Key: <scan-event-uuid>
 ```
 
-This is a proposed route, not a deployed URL. Once deployed, configure its full
-HTTPS URL in this monitor. Bearer authentication is optional on the client, but
+Configured endpoint: `https://whatscripts.whatbytes.club/api/v1/credential-monitor/logs`.
+The endpoint is hosted in the separate API project. Bearer authentication is optional on the client, but
 configure a token if your endpoint requires it.
 
 ## Request body: five fields
@@ -54,7 +54,7 @@ trigger for detected credentials or incomplete verification; both have API statu
 4. Return `201 Created` after the insert commits. On a retry of an existing event,
    return `200 OK` without inserting a duplicate row.
 5. Return a non-2xx response if validation, authentication, or storage fails.
-   The monitor retains the event and retries on a later scheduled run.
+   The monitor retains the event and retries on a later scheduled or force-alert run.
 
 Example success response (the monitor only checks the HTTP status):
 
@@ -96,7 +96,7 @@ Authorization header in this table.
 
 ```json
 {
-  "logging_api_url": "https://YOUR_DOMAIN/api/v1/credential-monitor/logs",
+  "logging_api_url": "https://whatscripts.whatbytes.club/api/v1/credential-monitor/logs",
   "logging_api_token": "YOUR_API_TOKEN"
 }
 ```
@@ -108,7 +108,7 @@ not a GitHub credential. Then install/update the schedule:
 python3 install_schedule.py --config config.json
 ```
 
-On Windows, use `py -3` instead of `python3`. Each scheduled run queues an event
+On Windows, use `py -3` instead of `python3`. Each scheduled or `--force-alert` run queues an event
 locally before delivery. Retries reuse its UUID, including when a response was
 lost after the server committed the record. Do not use `scanned_at` or device name
 alone as a unique key; multiple legitimate scans can share those values.
