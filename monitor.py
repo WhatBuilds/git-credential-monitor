@@ -56,7 +56,8 @@ def employee_label(config, local_user):
 def run(argv, timeout=25, cwd=None):
     # Never use shell=True or print command output/errors; these can contain secrets.
     return subprocess.run(argv, capture_output=True, text=True, errors="replace",
-                          timeout=timeout, cwd=cwd, stdin=subprocess.DEVNULL)
+                          timeout=timeout, cwd=cwd, stdin=subprocess.DEVNULL,
+                          creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
 
 
 def host_match(value, hosts):
@@ -512,6 +513,11 @@ def scheduled_report(report, config, config_path):
 
 
 def main():
+    # pythonw has no console streams. Preserve manual CLI output when present.
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w")
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", type=Path)
     mode = p.add_mutually_exclusive_group()

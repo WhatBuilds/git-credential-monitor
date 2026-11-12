@@ -10,6 +10,30 @@ FAKE_TOKEN = "ghp_" + "A" * 36
 
 
 class MonitorTests(unittest.TestCase):
+    def test_windows_child_commands_do_not_open_console(self):
+        with patch.object(m.sys, "platform", "win32"), \
+             patch.object(m.subprocess, "CREATE_NO_WINDOW", 0x08000000, create=True), \
+             patch.object(m.subprocess, "run") as command:
+            m.run(["git", "config", "--global", "--list"])
+            self.assertEqual(command.call_args.kwargs["creationflags"], 0x08000000)
+            self.assertTrue(command.call_args.kwargs["capture_output"])
+        with patch.object(m.sys, "platform", "darwin"), patch.object(m.subprocess, "run") as command:
+            m.run(["git", "--version"])
+            self.assertEqual(command.call_args.kwargs["creationflags"], 0)
+
+    def test_windowless_main_handles_missing_output_streams(self):
+        with patch.object(m.sys, "stdout", None), patch.object(m.sys, "stderr", None), \
+             patch.object(m.sys, "argv", ["monitor.py", "--config", "/nonexistent/monitor-config.json"]):
+            try:
+                self.assertEqual(m.main(), 3)
+                self.assertIsNotNone(m.sys.stdout)
+                self.assertIsNotNone(m.sys.stderr)
+            finally:
+                if m.sys.stdout is not None:
+                    m.sys.stdout.close()
+                if m.sys.stderr is not None:
+                    m.sys.stderr.close()
+
     def test_employee_label_optional_with_override(self):
         for config in ({}, {"employee": ""}, {"employee": "   "}, {"employee": None}):
             self.assertEqual(m.employee_label(config, "rahul"), "rahul")

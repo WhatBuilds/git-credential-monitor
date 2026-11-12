@@ -9,11 +9,15 @@ import install_schedule as scheduler
 
 class ScheduleTests(unittest.TestCase):
     def install(self, root, system, interval=2):
+        interpreter = root / 'Python With Spaces' / 'python.exe'
+        interpreter.parent.mkdir(exist_ok=True)
+        interpreter.with_name('pythonw.exe').touch()
         config = root / 'config.json'
         config.write_text(json.dumps({'slack_webhook': 'unused', 'logging_api_url': 'https://logs.example.test/scans', 'reminder_minutes': 3,
                                       'scan_interval_minutes': interval}))
         with patch.object(scheduler.Path, 'home', return_value=root), \
              patch.object(scheduler.platform, 'system', return_value=system), \
+             patch.object(scheduler.sys, 'executable', str(interpreter)), \
              patch.object(scheduler.os, 'geteuid', return_value=501, create=True), \
              patch.object(scheduler, 'command') as command, patch('builtins.print'):
             scheduler.install(config)
@@ -55,6 +59,15 @@ class ScheduleTests(unittest.TestCase):
             self.assertEqual(args[args.index('/MO') + 1], '2')
             self.assertIn('/IT', args)
             self.assertIn('--scheduled', args[args.index('/TR') + 1])
+            self.assertIn('pythonw.exe"', args[args.index('/TR') + 1])
+            self.assertTrue(args[args.index('/TR') + 1].startswith('"'))
+            self.assertNotIn('python.exe', args[args.index('/TR') + 1])
+            self.assertIn('/F', args)
+
+    def test_missing_pythonw_does_not_fall_back_to_console_python(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(RuntimeError, "pythonw.exe is missing"):
+                scheduler.windows_background_python(str(Path(tmp) / 'python.exe'))
 
     def test_invalid_interval_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

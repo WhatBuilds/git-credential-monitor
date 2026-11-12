@@ -24,6 +24,14 @@ def unit_quote(s):
     return '"' + str(s).replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("$", "$$") + '"'
 
 
+def windows_background_python(executable):
+    # Use the same installation/venv, never an unrelated interpreter from PATH.
+    windowless = Path(executable).with_name("pythonw.exe")
+    if not windowless.is_file():
+        raise RuntimeError("pythonw.exe is missing beside Python; repair the Python installation and rerun the installer")
+    return str(windowless)
+
+
 def install(config):
     script = Path(__file__).resolve().with_name("monitor.py")
     config = config.expanduser().resolve()
@@ -75,6 +83,7 @@ def install(config):
         command(["systemctl", "--user", "restart", LABEL + ".timer"])
     elif system == "Windows":
         # Current logged-on user; never SYSTEM. No webhook in task arguments.
+        args[0] = windows_background_python(sys.executable)
         command(["schtasks", "/Create", "/TN", "WhatBytes GitHub Credential Monitor",
                  "/SC", "MINUTE", "/MO", str(interval), "/IT", "/TR",
                  subprocess.list2cmdline(args), "/F"])
@@ -91,6 +100,10 @@ if __name__ == "__main__":
     options = parser.parse_args()
     try:
         install(options.config)
+    except RuntimeError as error:
+        # RuntimeError messages here are fixed diagnostics, not subprocess output.
+        print(f"Schedule installation failed: {error}", file=sys.stderr)
+        sys.exit(1)
     except Exception:
         print("Schedule installation failed. Check configuration, employee session and scheduler availability.", file=sys.stderr)
         sys.exit(1)

@@ -119,6 +119,20 @@ This installs only for the current user:
 | Ubuntu | systemd user service and timer of the same name | After user manager starts, then every configured scan interval |
 | Windows | Task Scheduler task `WhatBytes GitHub Credential Monitor` | Every configured scan interval while the employee is logged on |
 
+Windows tasks use `pythonw.exe` from the same Python installation or virtual
+environment as the installer. Child Git commands also run without console
+windows. Manual `py -3 monitor.py ...` commands keep their normal terminal output.
+If Windows users see a terminal flash at each scan, distribute the updated files
+and run this once to replace the existing task:
+
+```powershell
+py -3 install_schedule.py --config config.json
+```
+
+If `pythonw.exe` is missing, repair the Python installation and rerun the installer.
+The installer refuses to substitute console Python. Background errors are reflected
+in Task Scheduler's Last Run Result; use a manual run for console diagnostics.
+
 The folder, interpreter and config must stay at their installed locations.
 Sleeping, offline or logged-out devices do not provide continuous coverage.
 Delivery failures retry on the next scheduled run; no separate durable event
