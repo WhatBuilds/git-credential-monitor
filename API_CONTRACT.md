@@ -9,7 +9,7 @@ Authorization: Bearer <configured-token>
 Idempotency-Key: <scan-event-uuid>
 ```
 
-Configured endpoint: `https://whatscripts.whatbytes.club/api/v1/credential-monitor/logs`.
+Configured endpoint: `https://whatscripts.genricai.com/api/v1/credential-monitor/logs`.
 The endpoint is hosted in the separate API project. Bearer authentication is optional on the client, but
 configure a token if your endpoint requires it.
 
@@ -96,7 +96,7 @@ Authorization header in this table.
 
 ```json
 {
-  "logging_api_url": "https://whatscripts.whatbytes.club/api/v1/credential-monitor/logs",
+  "logging_api_url": "https://whatscripts.genricai.com/api/v1/credential-monitor/logs",
   "logging_api_token": "YOUR_API_TOKEN"
 }
 ```

@@ -35,7 +35,7 @@ Edit `config.json` locally using a text editor:
   "github_hosts": [],
   "reminder_minutes": 15,
   "scan_interval_minutes": 1,
-  "logging_api_url": "https://YOUR_API_HOST/credential-scans",
+  "logging_api_url": "https://whatscripts.genricai.com/api/v1/credential-monitor/logs",
   "logging_api_token": "",
   "repositories": [],
   "extra_files": []
@@ -208,12 +208,12 @@ stored credentials or revoke tokens. The API log uses the same warning and guida
 | Mode | Passing scan | Credentials found | No findings, incomplete coverage |
 | --- | --- | --- | --- |
 | `--dry-run` | Print JSON locally | Print JSON locally | Print JSON locally |
-| `--force-alert` | Send Slack report | Send Slack report | Send Slack report |
+| `--force-alert` | Log to API and send Slack | Log to API and send Slack | Log to API and send Slack |
 | `--scheduled` | Log to API only | Log to API and alert Slack | Log to API and alert Slack |
 
 Dry runs never contact either service, show dialogs, or update state. Their JSON
 includes an `outcome` of `pass`, `fail`, or `incomplete`. Force alerts bypass Slack
-suppression for every outcome and do not call the logging API. These modes are
+suppression for every outcome and also log the report to the API. These modes are
 mutually exclusive. All three operating systems use the same reporting rules.
 Local cleanup dialogs/deletion remain macOS-only.
 
@@ -229,11 +229,12 @@ runs retain the previous change/reminder/resolution behavior.
 
 Set `logging_api_url` to your real HTTPS endpoint before installing the schedule.
 Set `logging_api_token` if it requires bearer authentication. Alternatively,
-`GITHUB_MONITOR_API_TOKEN` overrides the token when available to the process;
+`CREDENTIAL_MONITOR_API_KEY` overrides the token when available to the process
+(the older `GITHUB_MONITOR_API_TOKEN` variable is also supported);
 schedulers generally do not inherit terminal environment variables. Protect the
 config file, which may now contain both API and Slack credentials.
 
-Each scheduled scan POSTs five JSON fields: `user_name`, `device`, `status`,
+Each scheduled or forced scan POSTs five JSON fields: `user_name`, `device`, `status`,
 `log`, and `scanned_at`. The status is `pass` only for complete scans without
 findings; it is `fail` for findings or incomplete checks. The log is the text
 version of the Slack report, including its visible size limits. Scheduled Slack
@@ -252,12 +253,23 @@ as a unique ID to prevent duplicate rows on retries. Optional authorization is
 
 Every scan is first saved in `api-outbox/` beside the config with sanitized
 metadata only. Up to five oldest events are sent per run and removed only after
-acknowledgment. API errors leave saved events for the next scheduled run, while
+acknowledgment. API errors leave saved events for the next scheduled or force-alert run, while
 Slack delivery is attempted independently. The queue can grow during an extended
 outage; monitor local disk space. A disk-write failure cannot preserve that scan.
 Queued metadata includes employee/device identifiers but no credential values,
 item references, API tokens, or webhook URLs. Do not run overlapping manual
 `--scheduled` invocations with the installed schedule.
+
+The local config now points to
+`https://whatscripts.genricai.com/api/v1/credential-monitor/logs`.
+Set `logging_api_token` to the actual API key (not the literal placeholder
+`<CREDENTIAL_MONITOR_API_KEY>`), or set `CREDENTIAL_MONITOR_API_KEY` in the process
+environment. No real API key is included in this repository.
+
+A forced run logs the same scan used for its Slack report, after any local
+cleanup. An API failure does not block Slack delivery, but the command returns
+exit code 3 and retains any successfully queued event for retry. Dry runs remain
+local-only.
 
 The installer validates the API URL locally; it does not verify the remote API.
 Re-run the installer on existing machines to switch them to `--scheduled`.

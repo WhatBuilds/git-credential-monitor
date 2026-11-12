@@ -518,7 +518,7 @@ def main():
     mode.add_argument("--dry-run", action="store_true", help="print sanitized inventory; never send Slack or update state")
     mode.add_argument("--local-alert", action="store_true", help="show the macOS cleanup dialog now without Slack or reminder suppression")
     mode.add_argument("--scheduled", action="store_true", help="log every scan to the API; alert Slack for findings or incomplete verification")
-    mode.add_argument("--force-alert", action="store_true", help="bypass Slack and local reminder suppression; send report even with no findings")
+    mode.add_argument("--force-alert", action="store_true", help="log to API and force Slack delivery for every outcome; bypass local reminder suppression")
     p.add_argument("--linux-worker", help=argparse.SUPPRESS)
     a = p.parse_args()
     if a.linux_worker:
@@ -564,6 +564,15 @@ def main():
             if a.scheduled:
                 return 3 if scheduled_failed else (2 if scheduled_scan["coverage"] == "incomplete"
                                                   else (1 if scheduled_scan["findings"] else 0))
+            api_failed = False
+            if a.force_alert:
+                try:
+                    log_scan(report, config, a.config.expanduser().resolve().parent / "api-outbox",
+                             mode="force-alert")
+                    print("Forced scan queued for API logging; available backlog delivery attempted.")
+                except Exception:
+                    print("API logging failed; saved events will retry. Slack delivery will still be attempted.", file=sys.stderr)
+                    api_failed = True
             webhook = os.environ.get("GITHUB_MONITOR_SLACK_WEBHOOK") or config.get("slack_webhook")
             if not webhook:
                 print("No Slack webhook configured. Use --dry-run or configure reporting.", file=sys.stderr)
@@ -574,6 +583,8 @@ def main():
                 print("Report delivered." if sent else "Scan completed; duplicate/empty alert suppressed.")
             except Exception:
                 print("Slack delivery or state update failed; no successful delivery state recorded. Check connectivity/configuration.", file=sys.stderr)
+                return 3
+            if api_failed:
                 return 3
         return 2 if report["coverage"] == "incomplete" else (1 if report["findings"] else 0)
     except Exception:

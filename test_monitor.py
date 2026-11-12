@@ -295,7 +295,7 @@ class MonitorTests(unittest.TestCase):
             config.write_text(json.dumps({"slack_webhook": "unused"}))
             with patch.object(m.Scan, "scan", return_value=self.report()), \
                  patch.object(m.platform, "system", return_value="Darwin"), \
-                 patch.object(m, "deliver") as deliver, patch("builtins.print"), \
+                 patch.object(m, "deliver") as deliver, patch.object(m, "log_scan"), patch("builtins.print"), \
                  patch.object(m.sys, "argv", ["monitor.py", "--config", str(config), "--force-alert"]):
                 self.assertEqual(m.main(), 1)
                 self.assertTrue(deliver.call_args_list[0].kwargs["force"])

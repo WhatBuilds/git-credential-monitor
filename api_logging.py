@@ -1,4 +1,4 @@
-"""Durable, sanitized scheduled-scan logging. No credential values are accepted."""
+"""Durable, sanitized scan logging. No credential values are accepted."""
 import json
 import os
 from pathlib import Path
@@ -33,7 +33,7 @@ def outcome(report):
     return 'pass'
 
 
-def event_for(report):
+def event_for(report, mode="scheduled"):
     # Explicit allowlist keeps future local-only metadata out of remote logging.
     inventory = {key: report[key] for key in (
         'timestamp', 'employee', 'device', 'local_user', 'os', 'coverage')}
@@ -41,7 +41,7 @@ def event_for(report):
                              for f in report['findings']]
     inventory['checks'] = [{key: c[key] for key in ('source', 'status', 'reason') if key in c}
                            for c in report['checks']]
-    return dict(schema_version=1, event_id=str(uuid.uuid4()), mode='scheduled',
+    return dict(schema_version=1, event_id=str(uuid.uuid4()), mode=mode,
                 outcome=outcome(report), report=inventory)
 
 
@@ -60,7 +60,8 @@ def api_payload(event):
 def post_event(config, event):
     endpoint = validate_api(config)
     headers = {'Content-Type': 'application/json', 'Idempotency-Key': event['event_id']}
-    token = os.environ.get('GITHUB_MONITOR_API_TOKEN') or config.get('logging_api_token')
+    token = (os.environ.get('CREDENTIAL_MONITOR_API_KEY') or
+             os.environ.get('GITHUB_MONITOR_API_TOKEN') or config.get('logging_api_token'))
     if token:
         headers['Authorization'] = 'Bearer ' + token
     request = urllib.request.Request(endpoint, data=json.dumps(api_payload(event)).encode(), headers=headers, method='POST')
@@ -69,11 +70,11 @@ def post_event(config, event):
             raise RuntimeError('Logging API did not acknowledge event')
 
 
-def log_scan(report, config, directory):
+def log_scan(report, config, directory, mode="scheduled"):
     """Queue every scan, then retry up to five oldest events. Failures stay queued."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    event = event_for(report)
+    event = event_for(report, mode=mode)
     path = directory / f"{time.time_ns():020d}-{event['event_id']}.json"
     temporary = path.with_suffix('.tmp')
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

@@ -79,6 +79,24 @@ class LoggingTests(unittest.TestCase):
             self.assertEqual(req.get_header('Idempotency-key'), event['event_id'])
             self.assertEqual(req.method, 'POST')
 
+    def test_named_api_key_environment_variable(self):
+        with patch.object(api.urllib.request, 'build_opener') as opener, \
+             patch.dict(api.os.environ, {'CREDENTIAL_MONITOR_API_KEY': 'environment-test-key'}, clear=True):
+            opener.return_value.open.return_value.__enter__.return_value.status = 201
+            api.post_event(self.config, api.event_for(report(), mode='force-alert'))
+            request = opener.return_value.open.call_args.args[0]
+            self.assertEqual(request.get_header('Authorization'), 'Bearer environment-test-key')
+
+    def test_force_alert_api_failure_still_sends_slack(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'config.json'
+            path.write_text(json.dumps(dict(self.config, slack_webhook='unused', local_alerts=False)))
+            with patch.object(m.Scan, 'scan', return_value=report(True)), \
+                 patch.object(m, 'log_scan', side_effect=OSError), patch.object(m, 'notify') as slack, \
+                 patch.object(m.sys, 'argv', ['monitor.py', '--config', str(path), '--force-alert']), patch('builtins.print'):
+                self.assertEqual(m.main(), 3)
+                slack.assert_called_once()
+
     def test_invalid_endpoints_and_non_success_keep_event(self):
         for url in ('', 'http://example.test', 'https://user:pass@example.test', 'https://example.test/#x'):
             with self.assertRaises(ValueError):
@@ -118,7 +136,7 @@ class LoggingTests(unittest.TestCase):
                     log.assert_called_once()
                     slack.assert_not_called()
 
-    def test_manual_modes_for_pass_and_fail_never_log_to_api(self):
+    def test_manual_modes_for_pass_and_fail_log_only_force_alert(self):
         for found in (False, True):
             for mode in ('--dry-run', '--force-alert'):
                 with tempfile.TemporaryDirectory() as tmp:
@@ -128,7 +146,10 @@ class LoggingTests(unittest.TestCase):
                          patch.object(m, 'notify') as slack, patch.object(m.sys, 'argv', ['monitor.py', '--config', str(path), mode]), patch('builtins.print'):
                         self.assertEqual(m.main(), int(found))
                         self.assertEqual(slack.call_count, int(mode == '--force-alert'))
-                        log.assert_not_called()
+                        self.assertEqual(log.call_count, int(mode == '--force-alert'))
+                        if mode == '--force-alert':
+                            self.assertEqual(log.call_args.kwargs['mode'], 'force-alert')
+                            self.assertEqual(log.call_args.args[0], report(found))
 
 
 if __name__ == '__main__':
