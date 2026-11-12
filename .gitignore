@@ -1,0 +1,7 @@
+config.json
+monitor-state.json
+monitor-state.tmp
+__pycache__/
+.venv/
+
+monitor-local-state.json
