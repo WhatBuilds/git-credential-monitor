@@ -33,7 +33,8 @@ Edit `config.json` locally using a text editor:
   "employee": "",
   "slack_webhook": "PASTE_YOUR_SLACK_INCOMING_WEBHOOK_HERE",
   "github_hosts": [],
-  "reminder_hours": 24,
+  "reminder_minutes": 15,
+  "scan_interval_minutes": 1,
   "repositories": [],
   "extra_files": []
 }
@@ -80,7 +81,7 @@ is unlocked by the scanner. Missing dependencies, locked collections and timeout
 produce incomplete checks, not a clean result. macOS and Windows need no Python
 packages beyond the standard library.
 
-## Install the 15-minute schedule
+## Install the persistent background schedule
 
 After reviewing the dry-run and receiving the pilot Slack message:
 
@@ -94,13 +95,26 @@ Windows:
 py -3 install_schedule.py --config config.json
 ```
 
+This installs a persistent background schedule for the current user. It survives
+restart and resumes when that user logs in; no terminal needs to stay open.
+On macOS it runs at installation/login and every `scan_interval_minutes`
+(default 1). `reminder_minutes` (default 15) controls repeat notifications for
+unchanged findings, independently of scan frequency. Reminders are delivered on
+the first scan after they become due. Re-run the installer after changing the
+scan interval. Reminder changes take effect on the next scan.
+
+Existing configs using `reminder_hours` remain supported with their original
+duration; `reminder_minutes` takes precedence. The example and local config use
+minutes. macOS uses a logged-in user LaunchAgent so dialogs and the user's Keychain
+are accessible; it does not perform interactive cleanup before login.
+
 This installs only for the current user:
 
 | OS | Schedule | Behavior |
 | --- | --- | --- |
-| macOS | LaunchAgent `com.whatbytes.github-credential-monitor` | At user login/load, then every 900 seconds while the session runs |
-| Ubuntu | systemd user service and timer of the same name | Approximately one minute after user manager starts, then every 15 minutes |
-| Windows | Task Scheduler task `WhatBytes GitHub Credential Monitor` | Every 15 minutes while the employee is logged on |
+| macOS | LaunchAgent `com.whatbytes.github-credential-monitor` | At user login/load, then every configured scan interval while the session runs |
+| Ubuntu | systemd user service and timer of the same name | After user manager starts, then every configured scan interval |
+| Windows | Task Scheduler task `WhatBytes GitHub Credential Monitor` | Every configured scan interval while the employee is logged on |
 
 The folder, interpreter and config must stay at their installed locations.
 Sleeping, offline or logged-out devices do not provide continuous coverage.
@@ -205,7 +219,7 @@ to disable local dialogs and cleanup. Other operating systems use Slack only.
 
 Local alerts use their own `monitor-local-state.json` beside the config, so Slack
 failures do not cause repeated dialogs. Changed findings trigger a prompt;
-unchanged findings follow `reminder_hours` (24 by default). Incomplete checks
+unchanged findings follow `reminder_minutes` (15 by default). Incomplete checks
 alone do not trigger a dialog. Dry runs never show dialogs or change state.
 Local alert failures do not prevent Slack delivery. Identical check warnings
 are collapsed by source, status and reason; custom helpers remain unexecuted.
@@ -220,7 +234,7 @@ so employee/device names cannot trigger Slack mentions.
 
 Run `--dry-run` to inspect JSON without network requests or state changes.
 Normal runs send one grouped report when findings/incomplete checks change, a
-reminder after 24 hours (configurable), and a resolution when previously reported
+reminder after 15 minutes (configurable), and a resolution when previously reported
 issues disappear and the configured checks complete. An initially empty report
 is silent unless `--force-alert` is supplied. Identical entries are aggregated by
 source/type/count: replacing a token at the same location is not a new finding.
@@ -322,7 +336,7 @@ longer needed. Rotate the Slack webhook if an endpoint or config is compromised.
 Run the bundled synthetic tests from this folder:
 
 ```sh
-python3 -m unittest -v test_monitor.py
+python3 -m unittest -v
 ```
 
 Fourteen automated checks cover optional employee-name fallback, host matching, absence of raw tokens/paths in

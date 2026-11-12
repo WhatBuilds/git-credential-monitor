@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install a 15-minute per-user schedule. Run without sudo/Administrator."""
+"""Install a persistent per-user background schedule. Run without sudo/Administrator."""
 import argparse
 import json
 import os
@@ -8,6 +8,7 @@ import platform
 import plistlib
 import subprocess
 import sys
+from monitor import reminder_minutes
 
 LABEL = "com.whatbytes.github-credential-monitor"
 
@@ -30,6 +31,10 @@ def install(config):
     settings = json.loads(config.read_text())
     if not settings.get("slack_webhook"):
         raise RuntimeError("set slack_webhook in config before scheduling")
+    reminder_minutes(settings)
+    interval = settings.get("scan_interval_minutes", 1)
+    if isinstance(interval, bool) or not isinstance(interval, int) or not 1 <= interval <= 1439:
+        raise ValueError("scan_interval_minutes must be an integer between 1 and 1439")
     args = [sys.executable, str(script), "--config", str(config)]
     system = platform.system()
     if system != "Windows" and os.geteuid() == 0:
@@ -38,14 +43,16 @@ def install(config):
         folder = Path.home() / "Library/LaunchAgents"
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / (LABEL + ".plist")
-        content = dict(Label=LABEL, ProgramArguments=args, StartInterval=900,
+        content = dict(Label=LABEL, ProgramArguments=args, StartInterval=interval * 60,
                        RunAtLoad=True, ProcessType="Background",
+                       LimitLoadToSessionType="Aqua",
                        EnvironmentVariables={"PATH": os.environ.get("PATH", "/usr/bin:/bin")})
         with path.open("wb") as f:
             plistlib.dump(content, f)
         os.chmod(path, 0o600)
         domain = f"gui/{os.getuid()}"
         command(["launchctl", "bootout", domain, str(path)], required=False)
+        command(["launchctl", "enable", f"{domain}/{LABEL}"])
         command(["launchctl", "bootstrap", domain, str(path)])
     elif system == "Linux":
         folder = Path.home() / ".config/systemd/user"
@@ -59,18 +66,21 @@ def install(config):
             service += "Environment=" + unit_quote("DBUS_SESSION_BUS_ADDRESS=unix:path=" + bus) + "\n"
         (folder / (LABEL + ".service")).write_text(service)
         (folder / (LABEL + ".timer")).write_text(
-            "[Unit]\nDescription=Scan GitHub credential presence every 15 minutes\n\n[Timer]\n"
-            "OnStartupSec=60\nOnUnitActiveSec=15min\nAccuracySec=30s\n\n[Install]\nWantedBy=timers.target\n")
+            "[Unit]\nDescription=Scan GitHub credential presence\n\n[Timer]\n"
+            f"OnStartupSec=10\nOnUnitActiveSec={interval}min\nAccuracySec=1s\n\n[Install]\nWantedBy=timers.target\n")
         command(["systemctl", "--user", "daemon-reload"])
-        command(["systemctl", "--user", "enable", "--now", LABEL + ".timer"])
+        command(["systemctl", "--user", "enable", LABEL + ".timer"])
+        command(["systemctl", "--user", "restart", LABEL + ".timer"])
     elif system == "Windows":
         # Current logged-on user; never SYSTEM. No webhook in task arguments.
         command(["schtasks", "/Create", "/TN", "WhatBytes GitHub Credential Monitor",
-                 "/SC", "MINUTE", "/MO", "15", "/IT", "/TR",
+                 "/SC", "MINUTE", "/MO", str(interval), "/IT", "/TR",
                  subprocess.list2cmdline(args), "/F"])
     else:
         raise RuntimeError("unsupported operating system")
-    print("Installed a 15-minute schedule for the current user. Keep this folder in place.")
+    print(f"Installed persistent per-user schedule: scan every {interval} minute(s), "
+          f"remind every {reminder_minutes(settings):g} minute(s).")
+    print("Starts automatically after restart when you log in. No terminal needs to stay open. Keep this folder in place.")
 
 
 if __name__ == "__main__":

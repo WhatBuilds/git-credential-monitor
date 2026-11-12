@@ -30,6 +30,22 @@ TOKEN = re.compile(r"(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[
 ENV_KEYS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
 
 
+def reminder_minutes(config):
+    # Preserve the duration of older configs until they are migrated.
+    if "reminder_minutes" in config:
+        value = config["reminder_minutes"]
+    elif "reminder_hours" in config:
+        hours = config["reminder_hours"]
+        if isinstance(hours, bool) or not isinstance(hours, (int, float)):
+            raise ValueError("reminder_hours must be numeric")
+        value = hours * 60
+    else:
+        value = 15
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 1 <= value <= 525600:
+        raise ValueError("reminder_minutes must be between 1 and 525600")
+    return value
+
+
 def employee_label(config, local_user):
     label = config.get("employee")
     return label.strip() if isinstance(label, str) and label.strip() else local_user
@@ -500,7 +516,7 @@ def deliver(report, config, state_path, webhook, force=False, sender=None):
     issues = bool(content["findings"] or content["incomplete"])
     now = time.time()
     due = (force or (issues and (digest != state.get("digest") or
-           now - state.get("sent_at", 0) >= config.get("reminder_hours", 24) * 3600))
+           now - state.get("sent_at", 0) >= reminder_minutes(config) * 60))
            or (not issues and state.get("had_issues", False)))
     if not due:
         return False
@@ -534,6 +550,7 @@ def main():
         p.error("--config is required")
     try:
         config = json.loads(a.config.expanduser().read_text())
+        reminder_minutes(config)  # Validate before any notifications or cleanup.
         report = Scan(config).scan()
         if a.dry_run:
             print(json.dumps(report, indent=2))

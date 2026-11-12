@@ -2,8 +2,9 @@
   "employee": "",
   "slack_webhook": "",
   "github_hosts": [],
-  "reminder_hours": 24,
   "local_alerts": true,
   "repositories": [],
-  "extra_files": []
+  "extra_files": [],
+  "reminder_minutes": 15,
+  "scan_interval_minutes": 1
 }

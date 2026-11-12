@@ -268,6 +268,24 @@ class MonitorTests(unittest.TestCase):
             with patch.object(m.time, "time", return_value=m.time.time() + 86401):
                 self.assertTrue(m.deliver(self.report(), {}, state, None, sender=alert))
 
+    def test_minute_reminders_and_legacy_config(self):
+        self.assertEqual(m.reminder_minutes({}), 15)
+        self.assertEqual(m.reminder_minutes({"reminder_hours": 2}), 120)
+        self.assertEqual(m.reminder_minutes({"reminder_hours": 2, "reminder_minutes": 3}), 3)
+        for value in (0, -1, True, "5", None, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                m.reminder_minutes({"reminder_minutes": value})
+        with tempfile.TemporaryDirectory() as tmp, patch.object(m, "notify") as notify:
+            state = Path(tmp) / "state.json"
+            config = {"reminder_minutes": 2}
+            with patch.object(m.time, "time", return_value=1000):
+                self.assertTrue(m.deliver(self.report(), config, state, "unused"))
+            with patch.object(m.time, "time", return_value=1119):
+                self.assertFalse(m.deliver(self.report(), config, state, "unused"))
+            with patch.object(m.time, "time", return_value=1120):
+                self.assertTrue(m.deliver(self.report(), config, state, "unused"))
+            self.assertEqual(notify.call_count, 2)
+
     def test_delivery_dedup_and_resolution(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(m, "notify") as notify:
             state = Path(tmp) / "state.json"
