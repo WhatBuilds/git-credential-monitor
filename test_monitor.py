@@ -88,10 +88,56 @@ class MonitorTests(unittest.TestCase):
             self.assertEqual(cmd.call_args.args[0], ["/usr/bin/security", "dump-keychain"])
         self.assertEqual(scan.findings[0]["count"], 1)
 
+    def test_mac_detects_fork_and_github_app_keychain_metadata(self):
+        fixture = ('keychain: "login"\nclass: "genp"\nattributes:\n'
+                   '    "svce"<blob>="fork:https://github.com.example.accesstoken"\n'
+                   'keychain: "login"\nclass: "genp"\nattributes:\n'
+                   '    "svce"<blob>="GitHub - https://api.github.com"\n')
+        scan = m.Scan({})
+        with patch.object(m, "run", return_value=subprocess.CompletedProcess([], 0, fixture, "")):
+            scan.mac()
+        self.assertEqual(scan.findings[0]["count"], 2)
+        self.assertNotIn("example.accesstoken", json.dumps(scan.findings))
+
     def report(self, issues=True):
         return dict(timestamp="now", employee="Example", device="device", local_user="user", os="Linux",
                     findings=[dict(source="Store", kind="Credential present", count=1)] if issues else [],
                     checks=[], coverage="configured checks completed")
+
+    def test_github_cli_helper_notice_does_not_execute_or_claim_token(self):
+        scan = m.Scan({})
+        with patch.object(m, "run") as command:
+            scan.helper("!/opt/homebrew/bin/gh auth git-credential", "Git user/system configuration", None)
+            command.assert_not_called()
+        self.assertEqual(scan.findings, [])
+        self.assertEqual(scan.checks[0]["status"], "incomplete")
+        self.assertIn("GitHub CLI", scan.checks[0]["reason"])
+        report = self.report(False)
+        report.update(checks=scan.checks, coverage="incomplete", os="Darwin")
+        payload = m.slack_payload(report)
+        rendered = json.dumps(payload, ensure_ascii=False)
+        self.assertIn("Verification failed — credentials may remain", payload["text"])
+        self.assertIn("This result is FAIL", rendered)
+        self.assertIn("Fork", rendered)
+        self.assertIn("saved by other apps", rendered)
+        self.assertNotIn("No credentials detected", rendered)
+        self.assertIn("gh auth logout", rendered)
+        self.assertIn("Limited: configured Git helpers were not executed", rendered)
+        self.assertNotIn("*Incomplete checks*", rendered)
+        self.assertEqual(report["coverage"], "incomplete")
+
+    def test_custom_helper_does_not_receive_github_cli_logout_guidance(self):
+        scan = m.Scan({})
+        scan.helper("!gh auth git-credential; echo unsafe", "Git config", None)
+        report = self.report(False)
+        report.update(checks=scan.checks, coverage="incomplete")
+        rendered = json.dumps(m.slack_payload(report))
+        self.assertNotIn("gh auth logout", rendered)
+        self.assertIn("Git authentication helper", rendered)
+        report["checks"].append(dict(source="Keychain", status="incomplete", reason="Query failed"))
+        self.assertIn("checks incomplete", m.slack_payload(report)["text"])
+        report["findings"] = self.report()["findings"]
+        self.assertIn("Credentials found", m.slack_payload(report)["text"])
 
     def test_slack_status_and_incomplete_coverage(self):
         report = self.report(False)
@@ -99,7 +145,7 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("Findings cleared", m.slack_payload(report, resolved=True)["text"])
         report["checks"] = [dict(source="Store", status="incomplete", reason="Locked")]
         payload = m.slack_payload(report, resolved=True)
-        self.assertIn("Checks incomplete", payload["text"])
+        self.assertIn("checks incomplete", payload["text"])
         self.assertIn("Locked", json.dumps(payload))
         report["findings"] = self.report()["findings"]
         self.assertIn("Credentials found", m.slack_payload(report)["text"])

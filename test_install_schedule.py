@@ -10,7 +10,7 @@ import install_schedule as scheduler
 class ScheduleTests(unittest.TestCase):
     def install(self, root, system, interval=2):
         config = root / 'config.json'
-        config.write_text(json.dumps({'slack_webhook': 'unused', 'reminder_minutes': 3,
+        config.write_text(json.dumps({'slack_webhook': 'unused', 'logging_api_url': 'https://logs.example.test/scans', 'reminder_minutes': 3,
                                       'scan_interval_minutes': interval}))
         with patch.object(scheduler.Path, 'home', return_value=root), \
              patch.object(scheduler.platform, 'system', return_value=system), \
@@ -26,9 +26,10 @@ class ScheduleTests(unittest.TestCase):
             path = root / 'Library/LaunchAgents' / (scheduler.LABEL + '.plist')
             content = plistlib.loads(path.read_bytes())
             self.assertTrue(content['RunAtLoad'])
+            self.assertEqual(content['ProgramArguments'][-1], '--scheduled')
             self.assertEqual(content['StartInterval'], 120)
             self.assertEqual(content['LimitLoadToSessionType'], 'Aqua')
-            self.assertEqual(content['ProgramArguments'][-1], str((root / 'config.json').resolve()))
+            self.assertEqual(content['ProgramArguments'][-2], str((root / 'config.json').resolve()))
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             self.assertEqual([c.args[0][1] for c in command.call_args_list], ['bootout', 'enable', 'bootstrap'])
             self.install(root, 'Darwin', 4)
@@ -40,6 +41,8 @@ class ScheduleTests(unittest.TestCase):
             command = self.install(root, 'Linux')
             timer = (root / '.config/systemd/user' / (scheduler.LABEL + '.timer')).read_text()
             self.assertIn('OnUnitActiveSec=2min', timer)
+            service = (root / '.config/systemd/user' / (scheduler.LABEL + '.service')).read_text()
+            self.assertIn('--scheduled', service)
             self.assertIn('WantedBy=timers.target', timer)
             self.assertIn(['systemctl', '--user', 'enable', scheduler.LABEL + '.timer'],
                           [c.args[0] for c in command.call_args_list])
@@ -51,6 +54,7 @@ class ScheduleTests(unittest.TestCase):
             args = command.call_args.args[0]
             self.assertEqual(args[args.index('/MO') + 1], '2')
             self.assertIn('/IT', args)
+            self.assertIn('--scheduled', args[args.index('/TR') + 1])
 
     def test_invalid_interval_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

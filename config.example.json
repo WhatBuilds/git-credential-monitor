@@ -6,5 +6,7 @@
   "repositories": [],
   "extra_files": [],
   "reminder_minutes": 15,
-  "scan_interval_minutes": 1
+  "scan_interval_minutes": 1,
+  "logging_api_url": "",
+  "logging_api_token": ""
 }

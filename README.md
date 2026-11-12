@@ -35,6 +35,8 @@ Edit `config.json` locally using a text editor:
   "github_hosts": [],
   "reminder_minutes": 15,
   "scan_interval_minutes": 1,
+  "logging_api_url": "https://YOUR_API_HOST/credential-scans",
+  "logging_api_token": "",
   "repositories": [],
   "extra_files": []
 }
@@ -83,7 +85,7 @@ packages beyond the standard library.
 
 ## Install the persistent background schedule
 
-After reviewing the dry-run and receiving the pilot Slack message:
+After configuring the logging API, reviewing the dry-run and receiving the pilot Slack message:
 
 ```sh
 python3 install_schedule.py --config config.json
@@ -95,7 +97,8 @@ Windows:
 py -3 install_schedule.py --config config.json
 ```
 
-This installs a persistent background schedule for the current user. It survives
+The installer supports macOS, Ubuntu and Windows. It installs a persistent background
+schedule for the current user and always includes `--scheduled` in its command. It survives
 restart and resumes when that user logs in; no terminal needs to stay open.
 On macOS it runs at installation/login and every `scan_interval_minutes`
 (default 1). `reminder_minutes` (default 15) controls repeat notifications for
@@ -119,7 +122,8 @@ This installs only for the current user:
 The folder, interpreter and config must stay at their installed locations.
 Sleeping, offline or logged-out devices do not provide continuous coverage.
 Delivery failures retry on the next scheduled run; no separate durable event
-queue is included. Findings that disappear before a successful retry may be lost.
+queue is included for Slack. Findings that disappear before a successful Slack
+retry may be lost from Slack; saved API events remain queued independently.
 Do not edit config or move files while a scan is running.
 
 To check the schedule:
@@ -188,6 +192,76 @@ Employee identity is configured or derived from the local username; this is not
 verified HR identity. Use managed enrollment if you need
 trusted identity. Findings are policy alerts, not proof of compromise.
 
+## Manual and scheduled reporting
+
+When a configured helper cannot be verified, Slack warns **Verification failed —
+credentials may remain**. The API status is `fail`, and scheduled runs send a
+Slack warning using the normal reminder interval. The monitor does not claim a
+confirmed token merely because a helper exists. It distinguishes detected
+credentials from unverified coverage, but both require attention.
+
+`gh auth logout` does not establish that credentials saved by other applications
+have been removed. On macOS, review GitHub-related Keychain items saved by Fork
+and other Git clients too. Removing Git helper settings alone does not delete
+stored credentials or revoke tokens. The API log uses the same warning and guidance.
+
+| Mode | Passing scan | Credentials found | No findings, incomplete coverage |
+| --- | --- | --- | --- |
+| `--dry-run` | Print JSON locally | Print JSON locally | Print JSON locally |
+| `--force-alert` | Send Slack report | Send Slack report | Send Slack report |
+| `--scheduled` | Log to API only | Log to API and alert Slack | Log to API and alert Slack |
+
+Dry runs never contact either service, show dialogs, or update state. Their JSON
+includes an `outcome` of `pass`, `fail`, or `incomplete`. Force alerts bypass Slack
+suppression for every outcome and do not call the logging API. These modes are
+mutually exclusive. All three operating systems use the same reporting rules.
+Local cleanup dialogs/deletion remain macOS-only.
+
+Scheduled logging captures the scan **before** any local cleanup. A failed scan
+therefore still reaches the API and Slack if the user removes its findings in the
+dialog. Findings plus incomplete checks have outcome `fail`, with the incomplete
+coverage preserved. Incomplete-only scans are never represented as passing scans.
+Scheduled Slack messages follow `reminder_minutes`; passing scans
+silently reset suppression, without sending a resolution message. Manual unflagged
+runs retain the previous change/reminder/resolution behavior.
+
+### Logging API configuration and contract
+
+Set `logging_api_url` to your real HTTPS endpoint before installing the schedule.
+Set `logging_api_token` if it requires bearer authentication. Alternatively,
+`GITHUB_MONITOR_API_TOKEN` overrides the token when available to the process;
+schedulers generally do not inherit terminal environment variables. Protect the
+config file, which may now contain both API and Slack credentials.
+
+Each scheduled scan POSTs five JSON fields: `user_name`, `device`, `status`,
+`log`, and `scanned_at`. The status is `pass` only for complete scans without
+findings; it is `fail` for findings or incomplete checks. The log is the text
+version of the Slack report, including its visible size limits. Scheduled Slack
+alerts trigger for credentials found or incomplete verification.
+
+Implement `POST /api/v1/credential-monitor/logs` in your other project. See
+[API_CONTRACT.md](API_CONTRACT.md) for field definitions, responses, authentication,
+idempotency, and an optional database table. A complete sample request is in
+[examples/api-request.json](examples/api-request.json). No API is deployed by this
+repository.
+
+The API must return HTTP 2xx after accepting the event. Response bodies are not
+logged. Redirects are rejected. `Idempotency-Key` contains the event UUID; store it
+as a unique ID to prevent duplicate rows on retries. Optional authorization is
+`Authorization: Bearer <logging_api_token>`.
+
+Every scan is first saved in `api-outbox/` beside the config with sanitized
+metadata only. Up to five oldest events are sent per run and removed only after
+acknowledgment. API errors leave saved events for the next scheduled run, while
+Slack delivery is attempted independently. The queue can grow during an extended
+outage; monitor local disk space. A disk-write failure cannot preserve that scan.
+Queued metadata includes employee/device identifiers but no credential values,
+item references, API tokens, or webhook URLs. Do not run overlapping manual
+`--scheduled` invocations with the installed schedule.
+
+The installer validates the API URL locally; it does not verify the remote API.
+Re-run the installer on existing machines to switch them to `--scheduled`.
+
 ## Local macOS alerts
 
 To open the cleanup dialog immediately without sending Slack or waiting for the
@@ -233,16 +307,18 @@ use `--dry-run` locally for full details. Dynamic values render as plain text,
 so employee/device names cannot trigger Slack mentions.
 
 Run `--dry-run` to inspect JSON without network requests or state changes.
-Normal runs send one grouped report when findings/incomplete checks change, a
+Manual unflagged runs send one grouped report when findings/incomplete checks change, a
 reminder after 15 minutes (configurable), and a resolution when previously reported
 issues disappear and the configured checks complete. An initially empty report
 is silent unless `--force-alert` is supplied. Identical entries are aggregated by
 source/type/count: replacing a token at the same location is not a new finding.
 
-Incomplete scans generate alerts too. New findings can be delivered alongside an
+Manual unflagged/force-alert runs report incomplete checks too. Scheduled runs
+log incomplete-only scans to the API and alert Slack. New findings can be delivered alongside an
 incomplete check. There is never a claim that the whole device is clean.
 
-`monitor-state.json`, beside the config, stores only a report-structure digest,
+`monitor-state.json` (manual runs) and `monitor-scheduled-state.json` (scheduled
+Slack alerts), beside the config, store only a report-structure digest,
 last acknowledged notification time and previous issue status. It contains no
 token values or hashes derived from token values. Delete it to reset suppression.
 The next scan may send a fresh alert. Avoid overlapping manual invocations using

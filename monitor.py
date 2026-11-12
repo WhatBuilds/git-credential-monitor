@@ -24,6 +24,8 @@ import time
 from urllib.parse import urlsplit
 import urllib.request
 from keychain_remediation import Keychain, KeychainError
+from api_logging import log_scan, outcome
+from report_format import slack_payload
 
 MAX_FILE = 4 * 1024 * 1024
 TOKEN = re.compile(r"(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})(?![A-Za-z0-9_])")
@@ -187,6 +189,12 @@ class Scan:
             self.check(source, "incomplete", "credential helper could not be interpreted")
             return
         name = parts[0] if parts else ""
+        # Recognize the CLI's standard helper without executing it or assuming
+        # that its presence proves a stored token exists.
+        helper_name = name.lstrip("!").replace("\\", "/").rsplit("/", 1)[-1]
+        if helper_name in ("gh", "gh.exe") and parts[1:] == ["auth", "git-credential"]:
+            self.check(source, "incomplete", "GitHub CLI credential helper is configured; not executed")
+            return
         if name in ("store", "git-credential-store"):
             path = None
             for i, p in enumerate(parts[1:], 1):
@@ -362,65 +370,6 @@ def linux_worker(hosts):
     print(json.dumps(dict(count=count, status="checked" if complete else "incomplete")))
 
 
-def slack_payload(report, resolved=False):
-    """Build a bounded Block Kit report; dynamic values remain plain text."""
-    findings = report["findings"]
-    incomplete = [c for c in report["checks"] if c["status"] == "incomplete"]
-    if findings:
-        status = "⚠️ Credentials found"
-    elif incomplete:
-        status = "⚠️ Checks incomplete"
-    elif resolved:
-        status = "✅ Findings cleared in configured checks"
-    else:
-        status = "✅ No findings in configured checks"
-    summary = f"{len(findings)} finding groups • {len(incomplete)} incomplete checks"
-
-    def plain(value, limit=3000):
-        value = str(value)
-        if len(value) > limit:
-            value = value[:limit - 1] + "…"
-        return {"type": "plain_text", "text": value, "emoji": False}
-
-    def section(value):
-        return {"type": "section", "text": plain(value)}
-
-    blocks = [
-        {"type": "header", "text": plain("GitHub credential monitor", 150)},
-        section(f"{status}\n{summary}"),
-        {"type": "section", "fields": [
-            plain(f"{label}\n{report[key]}", 2000)
-            for label, key in (("Employee", "employee"), ("Device", "device"),
-                               ("Local user", "local_user"), ("OS", "os"),
-                               ("Time (UTC)", "timestamp"), ("Coverage", "coverage"))
-        ]},
-        {"type": "divider"},
-        {"type": "section", "text": {"type": "mrkdwn", "text": "*Findings*"}},
-    ]
-    # Reserve room for both categories and the footer within Slack's 50 blocks.
-    for finding in findings[:18]:
-        blocks.append(section(f"{finding['source']}\n{finding['kind']} • Count: {finding['count']}"))
-    if len(findings) > 18:
-        blocks.append(section(f"{len(findings) - 18} additional finding groups omitted. Review the local dry-run report for full details."))
-    if not findings:
-        blocks.append(section("No matching credentials found in inspected locations; this is not a device safety verdict."))
-    if incomplete:
-        blocks.extend([
-            {"type": "divider"},
-            {"type": "section", "text": {"type": "mrkdwn", "text": "*Incomplete checks*"}},
-        ])
-        for check in incomplete[:18]:
-            blocks.append(section(f"{check['source']}\n{check.get('reason', 'Check could not be completed')}"))
-        if len(incomplete) > 18:
-            blocks.append(section(f"{len(incomplete) - 18} additional incomplete checks omitted. Review the local dry-run report for full details."))
-    if findings:
-        blocks.append(section("Next step: Remove stored entries locally according to company policy."))
-    if incomplete:
-        blocks.append(section("Next step: Review incomplete checks locally and rerun the monitor."))
-    blocks.append({"type": "context", "elements": [plain("No credential values collected in this report.", 2000)]})
-    # Only fixed labels and numeric totals enter the notification fallback.
-    return {"text": f"GitHub credential monitor — {status}. {summary}",
-            "blocks": blocks, "unfurl_links": False, "unfurl_media": False}
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -534,13 +483,42 @@ def deliver(report, config, state_path, webhook, force=False, sender=None):
     return True
 
 
+def scheduled_report(report, config, config_path):
+    """Log every scan and alert Slack for findings or incomplete verification."""
+    failed = False
+    folder = config_path.expanduser().resolve().parent
+    try:
+        log_scan(report, config, folder / "api-outbox")
+        print("Scheduled scan queued for API logging; available backlog delivery attempted.")
+    except Exception:
+        print("API logging failed; saved events will retry on the next scheduled run. Check API settings and local storage.", file=sys.stderr)
+        failed = True
+    try:
+        state = folder / "monitor-scheduled-state.json"
+        if outcome(report) != "pass":
+            webhook = os.environ.get("GITHUB_MONITOR_SLACK_WEBHOOK") or config.get("slack_webhook")
+            if not webhook:
+                raise ValueError("Slack webhook required for failed verification")
+            sent = deliver(report, config, state, webhook)
+            print("Failure alert delivered." if sent else "Duplicate failure alert suppressed.")
+        else:
+            # Reset suppression silently, so a recurrence triggers a fresh alert.
+            state.unlink(missing_ok=True)
+            print("Verification passed; scheduled Slack alert skipped.")
+    except Exception:
+        print("Scheduled Slack delivery/state update failed; retry on the next scan.", file=sys.stderr)
+        failed = True
+    return failed
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", type=Path)
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="print sanitized inventory; never send Slack or update state")
     mode.add_argument("--local-alert", action="store_true", help="show the macOS cleanup dialog now without Slack or reminder suppression")
-    p.add_argument("--force-alert", action="store_true", help="bypass Slack and local reminder suppression; send report even with no findings")
+    mode.add_argument("--scheduled", action="store_true", help="log every scan to the API; alert Slack for findings or incomplete verification")
+    mode.add_argument("--force-alert", action="store_true", help="bypass Slack and local reminder suppression; send report even with no findings")
     p.add_argument("--linux-worker", help=argparse.SUPPRESS)
     a = p.parse_args()
     if a.linux_worker:
@@ -553,7 +531,7 @@ def main():
         reminder_minutes(config)  # Validate before any notifications or cleanup.
         report = Scan(config).scan()
         if a.dry_run:
-            print(json.dumps(report, indent=2))
+            print(json.dumps(dict(report, outcome=outcome(report)), indent=2))
         elif a.local_alert:
             if platform.system() != "Darwin":
                 print("Local cleanup dialogs require macOS.", file=sys.stderr)
@@ -568,6 +546,9 @@ def main():
                     return 3
                 report = Scan(config).scan()
         else:
+            # Capture the detected state before a user can remove findings locally.
+            scheduled_failed = scheduled_report(report, config, a.config) if a.scheduled else False
+            scheduled_scan = report if a.scheduled else None
             if platform.system() == "Darwin" and config.get("local_alerts", True):
                 local_state = a.config.expanduser().resolve().with_name("monitor-local-state.json")
                 # Local prompts concern findings, not unsupported inspection methods.
@@ -580,6 +561,9 @@ def main():
                     print("Local alert or cleanup could not complete; check the desktop session and Keychain permissions.", file=sys.stderr)
                 # Include successful or partial cleanup in Slack and the exit status.
                 report = Scan(config).scan()
+            if a.scheduled:
+                return 3 if scheduled_failed else (2 if scheduled_scan["coverage"] == "incomplete"
+                                                  else (1 if scheduled_scan["findings"] else 0))
             webhook = os.environ.get("GITHUB_MONITOR_SLACK_WEBHOOK") or config.get("slack_webhook")
             if not webhook:
                 print("No Slack webhook configured. Use --dry-run or configure reporting.", file=sys.stderr)

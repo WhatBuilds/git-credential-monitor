@@ -9,6 +9,7 @@ import plistlib
 import subprocess
 import sys
 from monitor import reminder_minutes
+from api_logging import validate_api
 
 LABEL = "com.whatbytes.github-credential-monitor"
 
@@ -31,11 +32,12 @@ def install(config):
     settings = json.loads(config.read_text())
     if not settings.get("slack_webhook"):
         raise RuntimeError("set slack_webhook in config before scheduling")
+    validate_api(settings)
     reminder_minutes(settings)
     interval = settings.get("scan_interval_minutes", 1)
     if isinstance(interval, bool) or not isinstance(interval, int) or not 1 <= interval <= 1439:
         raise ValueError("scan_interval_minutes must be an integer between 1 and 1439")
-    args = [sys.executable, str(script), "--config", str(config)]
+    args = [sys.executable, str(script), "--config", str(config), "--scheduled"]
     system = platform.system()
     if system != "Windows" and os.geteuid() == 0:
         raise RuntimeError("run as employee, not root")
@@ -59,7 +61,7 @@ def install(config):
         folder.mkdir(parents=True, exist_ok=True)
         service = ("[Unit]\nDescription=GitHub credential presence monitor\n\n[Service]\n"
                    "Type=oneshot\nExecStart=" + " ".join(unit_quote(x) for x in args) +
-                   "\nSuccessExitStatus=1 2\nTimeoutStartSec=120\nUMask=0077\n" +
+                   "\nSuccessExitStatus=1 2\nTimeoutStartSec=300\nUMask=0077\n" +
                    "Environment=" + unit_quote("PATH=" + os.environ.get("PATH", "/usr/bin:/bin")) + "\n")
         bus = f"/run/user/{os.getuid()}/bus"
         if Path(bus).exists():

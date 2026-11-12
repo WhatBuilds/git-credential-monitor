@@ -1,0 +1,7 @@
+{
+  "user_name": "Rahul Sharma",
+  "device": "rahul-macbook",
+  "status": "fail",
+  "log": "GitHub credential monitor\n\n⚠️ Credentials found\n1 finding groups • 0 incomplete checks\n\nEmployee\nRahul Sharma\n\nDevice\nrahul-macbook\n\nLocal user\nrahul\n\nOS\nDarwin\n\nTime (UTC)\n2026-11-12T12:00:00+00:00\n\nCoverage\nconfigured checks completed\n\nFindings\n\nmacOS Keychain search list (metadata)\nGitHub-related credential entry present • Count: 4\n\nNext step: Remove stored entries locally according to company policy.\n\nNo credential values collected in this report.",
+  "scanned_at": "2026-11-12T12:00:00+00:00"
+}

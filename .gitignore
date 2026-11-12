@@ -5,3 +5,8 @@ __pycache__/
 .venv/
 
 monitor-local-state.json
+
+api-outbox/
+monitor-scheduled-state.json
+monitor-scheduled-state.tmp
+monitor-local-state.tmp
