@@ -32,6 +32,18 @@ def windows_background_python(executable):
     return str(windowless)
 
 
+def scheduler_python(system):
+    """Interpreter for the schedule. On Linux the Secret Service check needs the apt
+    package python3-secretstorage, which a user-local Python (pyenv, ~/.local) cannot see."""
+    if system == "Linux" and Path("/usr/bin/python3").exists():
+        probe = ["-c", "import secretstorage"]
+        if subprocess.run([sys.executable, *probe], capture_output=True).returncode and \
+                not subprocess.run(["/usr/bin/python3", *probe], capture_output=True).returncode:
+            print("Note: using /usr/bin/python3 because it provides secretstorage.", file=sys.stderr)
+            return "/usr/bin/python3"
+    return sys.executable
+
+
 def install(config):
     script = Path(__file__).resolve().with_name("monitor.py")
     config = config.expanduser().resolve()
@@ -45,8 +57,8 @@ def install(config):
     interval = settings.get("scan_interval_minutes", 1)
     if isinstance(interval, bool) or not isinstance(interval, int) or not 1 <= interval <= 1439:
         raise ValueError("scan_interval_minutes must be an integer between 1 and 1439")
-    args = [sys.executable, str(script), "--config", str(config), "--scheduled"]
     system = platform.system()
+    args = [scheduler_python(system), str(script), "--config", str(config), "--scheduled"]
     if system != "Windows" and os.geteuid() == 0:
         raise RuntimeError("run as employee, not root")
     if system == "Darwin":
@@ -70,7 +82,7 @@ def install(config):
         service = ("[Unit]\nDescription=GitHub credential presence monitor\n\n[Service]\n"
                    "Type=oneshot\nExecStart=" + " ".join(unit_quote(x) for x in args) +
                    "\nSuccessExitStatus=1 2\nTimeoutStartSec=300\nUMask=0077\n" +
-                   "Environment=" + unit_quote("PATH=" + os.environ.get("PATH", "/usr/bin:/bin")) + "\n")
+                   "Environment=" + unit_quote("PATH=/usr/local/bin:/usr/bin:/bin") + "\n")
         bus = f"/run/user/{os.getuid()}/bus"
         if Path(bus).exists():
             service += "Environment=" + unit_quote("DBUS_SESSION_BUS_ADDRESS=unix:path=" + bus) + "\n"
