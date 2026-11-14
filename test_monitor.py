@@ -396,6 +396,25 @@ class MonitorTests(unittest.TestCase):
             scan.linux()
         self.assertEqual(scan.checks[0]["status"], "incomplete")
 
+    def test_linux_retries_once_then_succeeds(self):
+        bad = subprocess.CompletedProcess([], 0, stdout='{"status": "incomplete", "count": 0}')
+        good = subprocess.CompletedProcess([], 0, stdout='{"status": "checked", "count": 0}')
+        scan = m.Scan({"employee": "Example"})
+        with patch.object(m, "run", side_effect=[bad, good]) as run, \
+                patch.object(m.time, "sleep") as sleep:
+            scan.linux()
+        self.assertEqual(run.call_count, 2)
+        sleep.assert_called_once_with(m.LINUX_RETRY_DELAY)
+        self.assertEqual(scan.checks[0]["status"], "checked")
+
+    def test_linux_retry_gives_up_after_one_attempt(self):
+        bad = subprocess.CompletedProcess([], 0, stdout='{"status": "incomplete", "count": 0}')
+        scan = m.Scan({"employee": "Example"})
+        with patch.object(m, "run", return_value=bad) as run, patch.object(m.time, "sleep"):
+            scan.linux()
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(scan.checks[0]["status"], "incomplete")
+
 
 if __name__ == "__main__":
     unittest.main()
