@@ -174,6 +174,8 @@ copy arbitrary token environment variables into the scheduler.
 | Git configuration | System/global, includes, plus configured repositories | Flags recognizable GitHub tokens, authenticated remote URLs and Authorization extraheaders; extraheaders may belong to another service and require review |
 | Process environment | Presence of GH_TOKEN, GITHUB_TOKEN, GH_ENTERPRISE_TOKEN, GITHUB_ENTERPRISE_TOKEN, and GIT_ASKPASS | Only the scanner's inherited environment; presence does not establish persistence. Does not inspect other processes or all shell sessions. GIT_ASKPASS is normally set only in editor terminals, so scheduled runs rarely see it |
 | Editor GitHub sign-ins | VS Code, Insiders, VSCodium, Cursor, Windsurf, Trae, Kiro, Positron (plus Flatpak VS Code/VSCodium on Linux): read-only query of `User/globalStorage/state.vscdb` for the built-in GitHub authentication secret's key name and ciphertext size | These editors hand their GitHub session to Git via `GIT_ASKPASS`, so Git can push with no credential in any store above. Never decrypts or reports the value or account. Older VS Code versions kept this in the OS credential store instead (covered above). JetBrains IDEs, GitHub Desktop, GitKraken and other Git clients are not covered |
+| SSH keys | Resolves the identity files OpenSSH would offer to GitHub hosts (and `ssh.github.com`) from `~/.ssh/config` (Host patterns, HostName aliases, Include; Match blocks assumed to apply), falling back to the default `id_*` keys like ssh does; classifies each file from its header as passphrase-protected or not | Reads only the cipher and key-type header fields; never reports file names. The config is parsed, never evaluated, so `Match exec`/`ProxyCommand` are not run. Hardware (`sk-*`) keys are not flagged. Cannot tell whether a key is registered on GitHub. On macOS, `UseKeychain yes` with a protected key is flagged because the passphrase is stored. Keys set via `core.sshCommand -i`, `GIT_SSH_COMMAND`, PuTTY/Pageant or 1Password-style agents are not covered |
+| SSH agent | `ssh-add -l` against the Windows OpenSSH agent service and any agent in `SSH_AUTH_SOCK`; counts loaded keys | Loaded keys sign without a passphrase, and the Windows service keeps them across reboots. Fingerprints and comments are never reported. Agents not reachable from the scanner's environment (common for scheduled runs on Linux/macOS) are not seen |
 | Additional files | Recognizable GitHub token patterns | Opt-in paths only; no recursive filesystem search, history, browser or process-memory scanning |
 
 Keychain/credential manager entries are **potential stored credential entries**:
@@ -398,8 +400,11 @@ Repository-local, conditional or application-supplied configuration may override
 this. Test actual pull/push behavior in your environment; the per-command empty
 helper setting is the clearest check. Do not rely on a global `--unset` alone:
 another scope can still provide a helper. Avoid `gh auth login` if the company
-policy forbids persisted GitHub CLI credentials. SSH authentication is a separate
-policy and is outside this monitor's coverage.
+policy forbids persisted GitHub CLI credentials.
+
+For SSH, add a passphrase to keys the monitor flags (`ssh-keygen -p -f <key>`), and
+clear a persistent agent with `ssh-add -D`. A passphrase does not protect a key that
+was already copied; rotate the key on GitHub if exposure is suspected.
 
 Removing a credential locally does not revoke an already stolen copy. For an
 affected employee, revoke/rotate exposed PAT/OAuth credentials and investigate
