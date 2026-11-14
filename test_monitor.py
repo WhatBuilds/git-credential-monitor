@@ -416,5 +416,57 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(scan.checks[0]["status"], "incomplete")
 
 
+class EditorSessionTests(unittest.TestCase):
+    SESSION_KEY = 'secret://{"extensionId":"vscode.github-authentication","key":"github.auth"}'
+
+    def editor(self, root, name, rows):
+        import sqlite3
+        db = Path(root) / name / "User/globalStorage/state.vscdb"
+        db.parent.mkdir(parents=True)
+        con = sqlite3.connect(db)
+        con.execute("CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)")
+        con.executemany("INSERT INTO ItemTable VALUES (?, ?)", rows)
+        con.commit()
+        con.close()
+        return (name, Path(root) / name)
+
+    @staticmethod
+    def envelope(nbytes):
+        return json.dumps({"type": "Buffer", "data": [200] * nbytes})
+
+    def test_signed_in_editor_is_reported_without_secret_or_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            value = self.envelope(400).replace("200", "123", 1) + FAKE_TOKEN
+            d = self.editor(tmp, "Code", [(self.SESSION_KEY, value), ("vscode.github", "{}")])
+            scan = m.Scan({})
+            scan.editors([d])
+            self.assertEqual(scan.findings, [dict(source="Editor GitHub sign-in (Code)",
+                                                  kind="editor holds a GitHub sign-in that Git can use", count=1)])
+            output = json.dumps([scan.findings, scan.checks])
+            self.assertNotIn(FAKE_TOKEN, output)
+            self.assertNotIn(tmp, output)
+
+    def test_signed_out_editor_and_other_extension_secrets_are_not_findings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dirs = [self.editor(tmp, "Code", [(self.SESSION_KEY, self.envelope(33))]),
+                    self.editor(tmp, "Cursor", [('secret://{"extensionId":"other.ext","key":"github.auth"}',
+                                                 self.envelope(400))])]
+            scan = m.Scan({})
+            scan.editors(dirs)
+            self.assertEqual(scan.findings, [])
+            self.assertEqual([c["status"] for c in scan.checks], ["checked", "checked"])
+
+    def test_missing_editor_is_silent_and_corrupt_database_is_incomplete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / "Windsurf/User/globalStorage/state.vscdb"
+            bad.parent.mkdir(parents=True)
+            bad.write_bytes(b"not a database" * 100)
+            scan = m.Scan({})
+            scan.editors([("Code", Path(tmp) / "Code"), ("Windsurf", Path(tmp) / "Windsurf")])
+            self.assertEqual(scan.findings, [])
+            self.assertEqual(scan.checks, [dict(source="Editor GitHub sign-in (Windsurf)", status="incomplete",
+                                                reason="editor state database unreadable or locked")])
+
+
 if __name__ == "__main__":
     unittest.main()

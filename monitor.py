@@ -31,6 +31,15 @@ MAX_FILE = 4 * 1024 * 1024
 LINUX_RETRY_DELAY = 20  # seconds before re-checking an incomplete Secret Service
 TOKEN = re.compile(r"(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})(?![A-Za-z0-9_])")
 ENV_KEYS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+# VS Code and forks that share its built-in GitHub sign-in. In Git terminals these
+# editors set GIT_ASKPASS, so Git can push with the editor's session and no
+# credential ever reaches the stores checked elsewhere.
+EDITORS = ("Code", "Code - Insiders", "VSCodium", "Cursor", "Windsurf", "Trae", "Kiro", "Positron")
+EDITOR_SESSION_KEY = re.compile(
+    r'^secret://\{.*"extensionId"\s*:\s*"vscode\.github-authentication".*"key"\s*:\s*"[^"]*\.auth"', re.I)
+# Encrypting an empty session list ("[]") yields well under this many bytes;
+# a real session (token, account, scopes) is several hundred.
+EMPTY_SESSION_MAX_BYTES = 64
 
 
 def reminder_minutes(config):
@@ -304,6 +313,60 @@ class Scan:
         except (ValueError, OSError, subprocess.SubprocessError):
             self.check(source, "incomplete", "Secret Service query failed or timed out")
 
+    def editor_dirs(self):
+        home = Path.home()
+        system = platform.system()
+        if system == "Windows":
+            base = Path(os.environ["APPDATA"]) if os.environ.get("APPDATA") else home / "AppData/Roaming"
+        elif system == "Darwin":
+            base = home / "Library/Application Support"
+        else:
+            base = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")
+        dirs = [(name, base / name) for name in EDITORS]
+        if system == "Linux":
+            # Flatpak installs keep their config inside the sandbox directory.
+            dirs += [(name + " (Flatpak)", home / ".var/app" / app / "config" / name)
+                     for app, name in (("com.visualstudio.code", "Code"),
+                                       ("com.vscodium.codium", "VSCodium"))]
+        return dirs
+
+    def editors(self, dirs=None):
+        """Detect GitHub sessions stored by VS Code-family editors.
+
+        Reads key names and ciphertext size from the editor's state database.
+        Never decrypts, returns or reports a secret value, account or path.
+        """
+        for name, directory in (dirs if dirs is not None else self.editor_dirs()):
+            db = directory / "User/globalStorage/state.vscdb"
+            if not db.exists():
+                continue  # Editor not installed for this user; nothing to report.
+            source = f"Editor GitHub sign-in ({name})"
+            try:
+                # Imported lazily: some minimal Linux Python builds omit sqlite3,
+                # and that must not stop the other checks from running.
+                import sqlite3
+            except ImportError:
+                self.check(source, "incomplete", "Python sqlite3 module unavailable")
+                continue
+            try:
+                # Read-only, no locking: the editor may hold the database open.
+                con = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+                try:
+                    rows = con.execute("SELECT key, length(value) FROM ItemTable "
+                                       "WHERE key LIKE 'secret://%github-authentication%'").fetchall()
+                finally:
+                    con.close()
+            except (sqlite3.Error, OSError, ValueError):
+                self.check(source, "incomplete", "editor state database unreadable or locked")
+                continue
+            # The value is a JSON Buffer envelope ({"type":"Buffer","data":[..]}) of
+            # ciphertext; roughly 4 characters per byte. Size only, never content.
+            sessions = sum(1 for key, size in rows
+                           if EDITOR_SESSION_KEY.match(key) and (size or 0) // 4 > EMPTY_SESSION_MAX_BYTES)
+            if sessions:
+                self.finding(source, "editor holds a GitHub sign-in that Git can use", sessions)
+            self.check(source)
+
     def scan(self):
         home = Path.home()
         xdg = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")
@@ -327,7 +390,11 @@ class Scan:
         for key in ENV_KEYS:
             if os.environ.get(key):
                 self.finding("Scanner process environment", key + " is set (persistence not established)")
+        if os.environ.get("GIT_ASKPASS"):
+            # Usually an editor terminal; Git can then obtain credentials from that app.
+            self.finding("Scanner process environment", "GIT_ASKPASS is set (Git can get credentials from an app)")
         self.check("Scanner process environment")
+        self.editors()
         if os.environ.get("GCM_CREDENTIAL_STORE", "").lower() in ("gpg", "dpapi", "cache"):
             self.check("GCM environment-selected store", "incomplete", "additional credential store is not inspected")
         system = platform.system()
