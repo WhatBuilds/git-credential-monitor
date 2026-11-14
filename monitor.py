@@ -28,6 +28,7 @@ from api_logging import log_scan, outcome
 from report_format import slack_payload
 
 MAX_FILE = 4 * 1024 * 1024
+LINUX_RETRY_DELAY = 20  # seconds before re-checking an incomplete Secret Service
 TOKEN = re.compile(r"(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})(?![A-Za-z0-9_])")
 ENV_KEYS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
 
@@ -286,9 +287,14 @@ class Scan:
         source = "Linux Secret Service (metadata)"
         try:
             # Bounded subprocess: D-Bus may stall. The worker only emits counts/status.
-            r = run([sys.executable, str(Path(__file__).resolve()), "--linux-worker",
-                     json.dumps(sorted(self.hosts))], timeout=35)
-            result = json.loads(r.stdout) if r.returncode == 0 else {}
+            # Retry once: right after boot/login the keyring may still be starting.
+            for attempt in range(2):
+                r = run([sys.executable, str(Path(__file__).resolve()), "--linux-worker",
+                         json.dumps(sorted(self.hosts))], timeout=35)
+                result = json.loads(r.stdout) if r.returncode == 0 else {}
+                if result.get("status") == "checked" or attempt:
+                    break
+                time.sleep(LINUX_RETRY_DELAY)
             if result.get("count"):
                 self.finding(source, "GitHub-related credential entry present", result["count"])
             if result.get("status") == "checked":
