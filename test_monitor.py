@@ -418,5 +418,155 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(scan.checks[0]["status"], "incomplete")
 
 
+class EditorSessionTests(unittest.TestCase):
+    SESSION_KEY = 'secret://{"extensionId":"vscode.github-authentication","key":"github.auth"}'
+
+    def editor(self, root, name, rows):
+        import sqlite3
+        db = Path(root) / name / "User/globalStorage/state.vscdb"
+        db.parent.mkdir(parents=True)
+        con = sqlite3.connect(db)
+        con.execute("CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)")
+        con.executemany("INSERT INTO ItemTable VALUES (?, ?)", rows)
+        con.commit()
+        con.close()
+        return (name, Path(root) / name)
+
+    @staticmethod
+    def envelope(nbytes):
+        return json.dumps({"type": "Buffer", "data": [200] * nbytes})
+
+    def test_signed_in_editor_is_reported_without_secret_or_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            value = self.envelope(400).replace("200", "123", 1) + FAKE_TOKEN
+            d = self.editor(tmp, "Code", [(self.SESSION_KEY, value), ("vscode.github", "{}")])
+            scan = m.Scan({})
+            scan.editors([d])
+            self.assertEqual(scan.findings, [dict(source="Editor GitHub sign-in (Code)",
+                                                  kind="editor holds a GitHub sign-in that Git can use", count=1)])
+            output = json.dumps([scan.findings, scan.checks])
+            self.assertNotIn(FAKE_TOKEN, output)
+            self.assertNotIn(tmp, output)
+
+    def test_signed_out_editor_and_other_extension_secrets_are_not_findings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dirs = [self.editor(tmp, "Code", [(self.SESSION_KEY, self.envelope(33))]),
+                    self.editor(tmp, "Cursor", [('secret://{"extensionId":"other.ext","key":"github.auth"}',
+                                                 self.envelope(400))])]
+            scan = m.Scan({})
+            scan.editors(dirs)
+            self.assertEqual(scan.findings, [])
+            self.assertEqual([c["status"] for c in scan.checks], ["checked", "checked"])
+
+    def test_missing_editor_is_silent_and_corrupt_database_is_incomplete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / "Windsurf/User/globalStorage/state.vscdb"
+            bad.parent.mkdir(parents=True)
+            bad.write_bytes(b"not a database" * 100)
+            scan = m.Scan({})
+            scan.editors([("Code", Path(tmp) / "Code"), ("Windsurf", Path(tmp) / "Windsurf")])
+            self.assertEqual(scan.findings, [])
+            self.assertEqual(scan.checks, [dict(source="Editor GitHub sign-in (Windsurf)", status="incomplete",
+                                                reason="editor state database unreadable or locked")])
+
+
+def fake_openssh_key(cipher=b"none", key_type=b"ssh-ed25519"):
+    """Header-accurate OpenSSH key with dummy contents (not a usable key)."""
+    import base64, struct
+
+    def s(b):
+        return struct.pack(">I", len(b)) + b
+    kdf = b"none" if cipher == b"none" else b"bcrypt"
+    blob = (b"openssh-key-v1\0" + s(cipher) + s(kdf) + s(b"") + struct.pack(">I", 1)
+            + s(s(key_type) + s(b"P" * 32)) + s(b"SECRET-MATERIAL" * 8))
+    body = base64.b64encode(blob).decode()
+    return ("-----BEGIN OPENSSH PRIVATE KEY-----\n" + "\n".join(body[i:i + 70] for i in range(0, len(body), 70))
+            + "\n-----END OPENSSH PRIVATE KEY-----\n").encode()
+
+
+class SshKeyTests(unittest.TestCase):
+    def test_key_state_classification(self):
+        self.assertEqual(m.ssh_key_state(fake_openssh_key()), "unencrypted")
+        self.assertEqual(m.ssh_key_state(fake_openssh_key(b"aes256-ctr")), "encrypted")
+        self.assertEqual(m.ssh_key_state(fake_openssh_key(key_type=b"sk-ssh-ed25519@openssh.com")), "hardware")
+        self.assertEqual(m.ssh_key_state(b"-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----\n"),
+                         "unencrypted")
+        self.assertEqual(m.ssh_key_state(b"-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\n"
+                                         b"DEK-Info: AES-128-CBC,00\n\nMIIE\n-----END RSA PRIVATE KEY-----\n"),
+                         "encrypted")
+        self.assertEqual(m.ssh_key_state(b"-----BEGIN ENCRYPTED PRIVATE KEY-----\nMII\n-----END"), "encrypted")
+        self.assertEqual(m.ssh_key_state(b"PuTTY-User-Key-File-3: ssh-ed25519\nEncryption: none\n"), "unencrypted")
+        self.assertEqual(m.ssh_key_state(b"PuTTY-User-Key-File-2: ssh-rsa\nEncryption: aes256-cbc\n"), "encrypted")
+        self.assertEqual(m.ssh_key_state(b"-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----"),
+                         "unknown")
+        self.assertIsNone(m.ssh_key_state(b""))
+        self.assertIsNone(m.ssh_key_state(b"ssh-ed25519 AAAA user@host"))
+
+    def identities(self, config, hosts=("github.com",)):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / ".ssh").mkdir()
+            (Path(tmp) / ".ssh/config").write_text(config)
+            lines = m.ssh_config_lines(Path(tmp) / ".ssh/config", Path(tmp) / ".ssh")
+            paths, keychain, unexpanded = m.ssh_github_identities(lines, set(hosts), Path(tmp), "me")
+            return [p.relative_to(tmp).as_posix() for p in paths], keychain, unexpanded
+
+    def test_defaults_without_config_and_unrelated_hosts_ignored(self):
+        paths, _, _ = self.identities("Host bastion\n  IdentityFile ~/.ssh/bastion\n")
+        self.assertIn(".ssh/id_ed25519", paths)
+        self.assertNotIn(".ssh/bastion", paths)
+
+    def test_configured_identity_replaces_defaults(self):
+        paths, _, _ = self.identities("Host github.com\n  IdentityFile ~/.ssh/gh_key\n  IdentitiesOnly yes\n")
+        self.assertEqual(paths, [".ssh/gh_key"])
+
+    def test_alias_wildcard_negation_keychain_and_tokens(self):
+        paths, keychain, unexpanded = self.identities(
+            "Host *\n  UseKeychain yes\n"
+            "Host gh-work\n  HostName github.com\n  IdentityFile %d/.ssh/work\n"
+            "Host * !github.com\n  IdentityFile ~/.ssh/not_for_github\n"
+            "Host github.com\n  IdentityFile ~/.ssh/%r_key\n")
+        self.assertIn(".ssh/work", paths)
+        self.assertNotIn(".ssh/not_for_github", paths)
+        self.assertTrue(keychain)
+        self.assertTrue(unexpanded)
+
+    def test_scan_reports_counts_never_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ssh_dir = Path(tmp) / ".ssh"
+            ssh_dir.mkdir()
+            (ssh_dir / "id_ed25519").write_bytes(fake_openssh_key())
+            (ssh_dir / "id_rsa").write_bytes(fake_openssh_key(b"aes256-ctr"))
+            (ssh_dir / "id_ecdsa_sk").write_bytes(fake_openssh_key(key_type=b"sk-ecdsa-sha2-nistp256@openssh.com"))
+            (ssh_dir / "unrelated_server").write_bytes(fake_openssh_key())
+            scan = m.Scan({})
+            scan.ssh(home=tmp, user="me")
+            self.assertEqual(scan.findings, [dict(source="SSH keys used for GitHub",
+                                                  kind="SSH private key without a passphrase is offered to GitHub",
+                                                  count=1)])
+            self.assertEqual(scan.checks, [dict(source="SSH keys used for GitHub", status="checked")])
+            output = json.dumps([scan.findings, scan.checks])
+            for leaked in ("id_ed25519", tmp, "SECRET"):
+                self.assertNotIn(leaked, output)
+
+    def test_agent_counts_keys_without_reporting_them(self):
+        listed = Mock(returncode=0, stdout="256 SHA256:abc me@laptop (ED25519)\n3072 SHA256:def x (RSA)\n")
+        scan = m.Scan({})
+        with patch.object(m.platform, "system", return_value="Linux"), \
+             patch.dict(m.os.environ, {"SSH_AUTH_SOCK": "/tmp/agent"}), \
+             patch.object(m.shutil, "which", return_value="/usr/bin/ssh-add"), \
+             patch.object(m, "run", return_value=listed):
+            scan.ssh_agent()
+        self.assertEqual(scan.findings[0]["count"], 2)
+        self.assertNotIn("SHA256", json.dumps(scan.findings))
+        scan = m.Scan({})
+        with patch.object(m.platform, "system", return_value="Linux"), \
+             patch.dict(m.os.environ, {"SSH_AUTH_SOCK": "/tmp/agent"}), \
+             patch.object(m.shutil, "which", return_value="/usr/bin/ssh-add"), \
+             patch.object(m, "run", return_value=Mock(returncode=2, stdout="")):
+            scan.ssh_agent()
+        self.assertEqual(scan.findings, [])
+        self.assertEqual(scan.checks, [dict(source="SSH agent", status="checked")])
+
+
 if __name__ == "__main__":
     unittest.main()

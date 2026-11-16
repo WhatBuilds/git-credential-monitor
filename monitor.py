@@ -5,9 +5,13 @@ No credential-helper execution, token validation, or secret reporting.
 Use --dry-run first. See README.md for coverage and deployment limits.
 """
 import argparse
+import base64
+import binascii
 import ctypes
 import datetime as dt
+import fnmatch
 import getpass
+import glob
 import hashlib
 import json
 import netrc
@@ -18,6 +22,7 @@ import re
 import shlex
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -31,6 +36,18 @@ MAX_FILE = 4 * 1024 * 1024
 LINUX_RETRY_DELAY = 20  # seconds before re-checking an incomplete Secret Service
 TOKEN = re.compile(r"(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})(?![A-Za-z0-9_])")
 ENV_KEYS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+# VS Code and forks that share its built-in GitHub sign-in. In Git terminals these
+# editors set GIT_ASKPASS, so Git can push with the editor's session and no
+# credential ever reaches the stores checked elsewhere.
+EDITORS = ("Code", "Code - Insiders", "VSCodium", "Cursor", "Windsurf", "Trae", "Kiro", "Positron")
+EDITOR_SESSION_KEY = re.compile(
+    r'^secret://\{.*"extensionId"\s*:\s*"vscode\.github-authentication".*"key"\s*:\s*"[^"]*\.auth"', re.I)
+# Encrypting an empty session list ("[]") yields well under this many bytes;
+# a real session (token, account, scopes) is several hundred.
+EMPTY_SESSION_MAX_BYTES = 64
+# Keys OpenSSH offers when no IdentityFile applies to the host (ssh -G order).
+SSH_DEFAULT_KEYS = ("id_rsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_xmss", "id_dsa")
+SSH_MAX_INCLUDES = 16
 
 
 def reminder_minutes(config):
@@ -74,6 +91,144 @@ def url_credential(value, hosts):
                 and (u.password is not None or bool(u.username and TOKEN.search(u.username))))
     except ValueError:
         return False
+
+
+def ssh_key_state(data):
+    """Classify a private key file from its headers only.
+
+    Returns "unencrypted", "encrypted", "hardware" (FIDO sk-* key: unusable
+    without the physical device), "unknown" (malformed key), or None (not a key).
+    Reads the cipher and key-type fields; never touches private key material.
+    """
+    text = data.decode("ascii", errors="replace")
+    m = re.search(r"-----BEGIN OPENSSH PRIVATE KEY-----(.*?)-----END OPENSSH PRIVATE KEY-----", text, re.S)
+    if m:
+        try:
+            blob = base64.b64decode("".join(m[1].split()))
+            magic = b"openssh-key-v1\0"
+            if not blob.startswith(magic):
+                return "unknown"
+            pos = len(magic)
+
+            def field():
+                nonlocal pos
+                (size,) = struct.unpack(">I", blob[pos:pos + 4])
+                value = blob[pos + 4:pos + 4 + size]
+                if len(value) != size:
+                    raise ValueError("truncated key header")
+                pos += 4 + size
+                return value
+            cipher = field()
+            field()  # KDF name
+            field()  # KDF options
+            pos += 4  # number of keys
+            public = field()
+            (size,) = struct.unpack(">I", public[:4])
+            key_type = public[4:4 + size]
+        except (ValueError, struct.error, binascii.Error):
+            return "unknown"
+        if cipher != b"none":
+            return "encrypted"
+        return "hardware" if key_type.startswith(b"sk-") else "unencrypted"
+    if "-----BEGIN ENCRYPTED PRIVATE KEY-----" in text:  # PKCS#8 with passphrase
+        return "encrypted"
+    m = re.search(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----(.*?)-----END", text, re.S)
+    if m:  # Traditional PEM (RSA/EC/DSA) or unencrypted PKCS#8
+        return "encrypted" if re.search(r"^\s*Proc-Type:\s*4,ENCRYPTED", m[1], re.M) else "unencrypted"
+    if re.match(r"PuTTY-User-Key-File-\d+:", text):
+        enc = re.search(r"^Encryption:\s*(\S+)", text, re.M)
+        return "unencrypted" if enc and enc[1] == "none" else "encrypted"
+    return None
+
+
+def ssh_config_lines(path, ssh_dir, depth=0):
+    """Parse an OpenSSH client config into (keyword, args), inlining Include.
+
+    Only reads files; Match exec, ProxyCommand and similar are never run.
+    Raises ValueError when an Include chain is too deep.
+    """
+    if depth > SSH_MAX_INCLUDES:
+        raise ValueError("Include nesting too deep")
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return []
+    lines = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = re.match(r"(\S+?)(?:\s*=\s*|\s+)(.*)$", line)
+        if not m:
+            continue
+        keyword = m[1].lower()
+        try:
+            args = shlex.split(m[2], comments=True)
+        except ValueError:
+            args = m[2].split()
+        if keyword == "include":
+            for pattern in args:
+                pattern = os.path.expanduser(pattern)
+                if not os.path.isabs(pattern):
+                    pattern = str(Path(ssh_dir) / pattern)  # relative to ~/.ssh, as ssh does
+                for included in sorted(Path(p) for p in glob.glob(pattern)):
+                    lines += ssh_config_lines(included, ssh_dir, depth + 1)
+        else:
+            lines.append((keyword, args))
+    return lines
+
+
+def ssh_github_identities(lines, hosts, home, user):
+    """Resolve which identity files OpenSSH would offer to the GitHub hosts.
+
+    Returns (paths, use_keychain, unexpanded). Host blocks count when a pattern
+    matches a GitHub host, or when they alias one via HostName. Match blocks are
+    assumed to apply (conditions are never evaluated). Like ssh, the default
+    id_* keys are used only where no IdentityFile applies.
+    """
+    blocks = [("global", [], [])]
+    for keyword, args in lines:
+        if keyword in ("host", "match"):
+            blocks.append((keyword, args, []))
+        else:
+            blocks[-1][2].append((keyword, args))
+
+    def host_matches(patterns, name):
+        positive = [p for p in patterns if not p.startswith("!")]
+        negative = [p[1:] for p in patterns if p.startswith("!")]
+        return (any(fnmatch.fnmatch(name, p.lower()) for p in positive)
+                and not any(fnmatch.fnmatch(name, p.lower()) for p in negative))
+
+    direct, alias_ids, alias_without_ids, use_keychain = [], [], False, False
+    for kind, patterns, settings in blocks:
+        hostname = next((a[0].lower() for k, a in settings if k == "hostname" and a), None)
+        ids = [a[0] for k, a in settings if k == "identityfile" and a and a[0].lower() != "none"]
+        is_direct = kind in ("global", "match") or any(host_matches(patterns, h) for h in hosts)
+        is_alias = kind == "host" and not is_direct and hostname in hosts
+        if not (is_direct or is_alias):
+            continue
+        if any(k == "usekeychain" and a and a[0].lower() == "yes" for k, a in settings):
+            use_keychain = True
+        if is_direct:
+            direct += ids
+        else:
+            alias_ids += ids
+            alias_without_ids = alias_without_ids or not ids
+    chosen = direct + alias_ids
+    if not direct or alias_without_ids:
+        chosen += ["~/.ssh/" + name for name in SSH_DEFAULT_KEYS]
+
+    paths, unexpanded = [], False
+    for value in dict.fromkeys(chosen):  # de-duplicate, keep order
+        value = value.replace("%%", "\0").replace("%d", str(home)).replace("%u", user)
+        if value.startswith("~"):
+            value = str(home) + value[1:]
+        if "%" in value or "${" in value:
+            unexpanded = True
+            continue
+        path = Path(value.replace("\0", "%"))
+        paths.append(path if path.is_absolute() else Path(home) / path)
+    return paths, use_keychain, unexpanded
 
 
 class Scan:
@@ -304,6 +459,125 @@ class Scan:
         except (ValueError, OSError, subprocess.SubprocessError):
             self.check(source, "incomplete", "Secret Service query failed or timed out")
 
+    def editor_dirs(self):
+        home = Path.home()
+        system = platform.system()
+        if system == "Windows":
+            base = Path(os.environ["APPDATA"]) if os.environ.get("APPDATA") else home / "AppData/Roaming"
+        elif system == "Darwin":
+            base = home / "Library/Application Support"
+        else:
+            base = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")
+        dirs = [(name, base / name) for name in EDITORS]
+        if system == "Linux":
+            # Flatpak installs keep their config inside the sandbox directory.
+            dirs += [(name + " (Flatpak)", home / ".var/app" / app / "config" / name)
+                     for app, name in (("com.visualstudio.code", "Code"),
+                                       ("com.vscodium.codium", "VSCodium"))]
+        return dirs
+
+    def editors(self, dirs=None):
+        """Detect GitHub sessions stored by VS Code-family editors.
+
+        Reads key names and ciphertext size from the editor's state database.
+        Never decrypts, returns or reports a secret value, account or path.
+        """
+        for name, directory in (dirs if dirs is not None else self.editor_dirs()):
+            db = directory / "User/globalStorage/state.vscdb"
+            if not db.exists():
+                continue  # Editor not installed for this user; nothing to report.
+            source = f"Editor GitHub sign-in ({name})"
+            try:
+                # Imported lazily: some minimal Linux Python builds omit sqlite3,
+                # and that must not stop the other checks from running.
+                import sqlite3
+            except ImportError:
+                self.check(source, "incomplete", "Python sqlite3 module unavailable")
+                continue
+            try:
+                # Read-only, no locking: the editor may hold the database open.
+                con = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+                try:
+                    rows = con.execute("SELECT key, length(value) FROM ItemTable "
+                                       "WHERE key LIKE 'secret://%github-authentication%'").fetchall()
+                finally:
+                    con.close()
+            except (sqlite3.Error, OSError, ValueError):
+                self.check(source, "incomplete", "editor state database unreadable or locked")
+                continue
+            # The value is a JSON Buffer envelope ({"type":"Buffer","data":[..]}) of
+            # ciphertext; roughly 4 characters per byte. Size only, never content.
+            sessions = sum(1 for key, size in rows
+                           if EDITOR_SESSION_KEY.match(key) and (size or 0) // 4 > EMPTY_SESSION_MAX_BYTES)
+            if sessions:
+                self.finding(source, "editor holds a GitHub sign-in that Git can use", sessions)
+            self.check(source)
+
+    def ssh(self, home=None, user=None):
+        """Find SSH private keys that OpenSSH would offer to GitHub and that
+        unlock without a passphrase. Reports counts only, never file names."""
+        source = "SSH keys used for GitHub"
+        home = Path(home or Path.home())
+        ssh_dir = home / ".ssh"
+        hosts = set(self.hosts)
+        if "github.com" in hosts:
+            hosts.add("ssh.github.com")  # GitHub's SSH-over-443 endpoint
+        try:
+            lines = ssh_config_lines(ssh_dir / "config", ssh_dir)
+            paths, use_keychain, unexpanded = ssh_github_identities(
+                lines, hosts, home, user or getpass.getuser())
+        except (OSError, ValueError):
+            self.check(source, "incomplete", "SSH client configuration could not be read")
+            return
+        if unexpanded:
+            self.check(source, "incomplete", "SSH IdentityFile uses tokens the monitor does not expand")
+        unprotected, protected, unknown = 0, 0, 0
+        for path in paths:
+            try:
+                if not path.is_file() or path.stat().st_size > 64 * 1024:
+                    continue
+                state = ssh_key_state(path.read_bytes())
+            except OSError:
+                unknown += 1
+                continue
+            if state == "unencrypted":
+                unprotected += 1
+            elif state == "encrypted":
+                protected += 1
+            elif state == "unknown":
+                unknown += 1
+        if unprotected:
+            self.finding(source, "SSH private key without a passphrase is offered to GitHub", unprotected)
+        if protected and use_keychain and platform.system() == "Darwin":
+            self.finding(source, "SSH key passphrase is saved in macOS Keychain (UseKeychain yes)", protected)
+        if unknown:
+            self.check(source, "incomplete", "SSH key file unreadable or in an unrecognised format")
+        self.check(source)
+
+    def ssh_agent(self):
+        """Count keys loaded in a reachable ssh-agent. Loaded keys sign without
+        a passphrase; the Windows OpenSSH agent service keeps them across reboots."""
+        source = "SSH agent"
+        commands = []
+        if platform.system() == "Windows":
+            system_add = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/OpenSSH/ssh-add.exe"
+            if system_add.exists():
+                commands.append([str(system_add), "-l"])  # Windows agent service (named pipe)
+        if os.environ.get("SSH_AUTH_SOCK") and shutil.which("ssh-add"):
+            commands.append([shutil.which("ssh-add"), "-l"])
+        keys = 0
+        for argv in commands:
+            try:
+                r = run(argv, timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if r.returncode == 0:  # 1: agent has no keys, 2: no agent running
+                # Count only; output lines carry fingerprints and key comments.
+                keys = max(keys, sum(1 for line in r.stdout.splitlines() if line.strip()))
+        if keys:
+            self.finding(source, "ssh-agent holds keys that sign without a passphrase", keys)
+        self.check(source)
+
     def scan(self):
         home = Path.home()
         xdg = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")
@@ -327,7 +601,13 @@ class Scan:
         for key in ENV_KEYS:
             if os.environ.get(key):
                 self.finding("Scanner process environment", key + " is set (persistence not established)")
+        if os.environ.get("GIT_ASKPASS"):
+            # Usually an editor terminal; Git can then obtain credentials from that app.
+            self.finding("Scanner process environment", "GIT_ASKPASS is set (Git can get credentials from an app)")
         self.check("Scanner process environment")
+        self.editors()
+        self.ssh()
+        self.ssh_agent()
         if os.environ.get("GCM_CREDENTIAL_STORE", "").lower() in ("gpg", "dpapi", "cache"):
             self.check("GCM environment-selected store", "incomplete", "additional credential store is not inspected")
         system = platform.system()
