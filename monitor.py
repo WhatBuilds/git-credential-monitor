@@ -66,6 +66,19 @@ def reminder_minutes(config):
     return value
 
 
+class IdentityConfigError(ValueError):
+    """Safe configuration diagnostic containing only fixed field labels."""
+
+
+def validate_identity(config):
+    missing = [label for field, label in (("employee", "employee (name)"), ("email", "email"))
+               if not isinstance(config.get(field), str) or not config[field].strip()]
+    if missing:
+        raise IdentityConfigError("Required config fields missing or blank: " + ", ".join(missing))
+    for field in ("employee", "email"):
+        config[field] = config[field].strip()
+
+
 def employee_label(config, local_user):
     label = config.get("employee")
     return label.strip() if isinstance(label, str) and label.strip() else local_user
@@ -844,6 +857,7 @@ def main():
         p.error("--config is required")
     try:
         config = json.loads(a.config.expanduser().read_text())
+        validate_identity(config)
         reminder_minutes(config)  # Validate before any notifications or cleanup.
         report = Scan(config).scan()
         if a.dry_run:
@@ -903,6 +917,9 @@ def main():
             if api_failed:
                 return 3
         return 2 if report["coverage"] == "incomplete" else (1 if report["findings"] else 0)
+    except IdentityConfigError as error:
+        print(f"Configuration error: {error}", file=sys.stderr)
+        return 3
     except Exception:
         # Never print exception strings: filesystem paths/URLs might contain secrets.
         print("Scan/configuration failed. Check config syntax, paths and permissions.", file=sys.stderr)

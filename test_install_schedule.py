@@ -3,7 +3,7 @@ from pathlib import Path
 import plistlib
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 import install_schedule as scheduler
 
 
@@ -13,12 +13,13 @@ class ScheduleTests(unittest.TestCase):
         interpreter.parent.mkdir(exist_ok=True)
         interpreter.with_name('pythonw.exe').touch()
         config = root / 'config.json'
-        config.write_text(json.dumps({'slack_api_url': 'https://slack.example.test/send', 'slack_api_token': 'dummy', 'logging_api_url': 'https://logs.example.test/scans', 'reminder_minutes': 3,
+        config.write_text(json.dumps({'employee': 'Example', 'email': 'example@example.com', 'slack_api_url': 'https://slack.example.test/send', 'slack_api_token': 'dummy', 'logging_api_url': 'https://logs.example.test/scans', 'reminder_minutes': 3,
                                       'scan_interval_minutes': interval}))
         with patch.object(scheduler.Path, 'home', return_value=root), \
              patch.object(scheduler.platform, 'system', return_value=system), \
              patch.object(scheduler.sys, 'executable', str(interpreter)), \
              patch.object(scheduler.os, 'geteuid', return_value=501, create=True), \
+             patch.object(scheduler.subprocess, 'run', return_value=Mock(returncode=0)), \
              patch.object(scheduler, 'command') as command, patch('builtins.print'):
             scheduler.install(config)
         return command
@@ -68,6 +69,18 @@ class ScheduleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(RuntimeError, "pythonw.exe is missing"):
                 scheduler.windows_background_python(str(Path(tmp) / 'python.exe'))
+
+    def test_missing_identity_rejected_before_installation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            for config in ({}, {"employee": "Example"}, {"email": "example@example.com"}):
+                path.write_text(json.dumps(config))
+                with patch.object(scheduler, "command") as command, \
+                     patch.object(scheduler, "scheduler_python") as interpreter:
+                    with self.assertRaises(scheduler.IdentityConfigError):
+                        scheduler.install(path)
+                command.assert_not_called()
+                interpreter.assert_not_called()
 
     def test_invalid_interval_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

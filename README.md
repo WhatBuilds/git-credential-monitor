@@ -30,7 +30,7 @@ Edit `config.json` locally using a text editor:
 
 ```json
 {
-  "employee": "",
+  "employee": "Your Name",
   "email": "employee@example.com",
   "slack_api_url": "https://whatscripts.genricai.com/api/v1/credential-monitor/slack",
   "slack_api_token": "",
@@ -44,10 +44,11 @@ Edit `config.json` locally using a text editor:
 }
 ```
 
-The `employee` field is optional. If omitted, null, empty or whitespace-only,
-the report uses the current OS username (for example, `rahul`). A nonempty name
-overrides this label. Run the scanner and installer as the employee so the
-detected username and inspected credential stores belong to that person.
+Both `employee` (name) and `email` are required nonempty strings. The scanner
+(including dry runs) and schedule installer stop with a configuration error if
+either is missing, null, empty or whitespace-only. Surrounding whitespace is trimmed.
+Run the scanner and installer as the employee so the detected username and
+inspected credential stores belong to that person.
 
 Set `email` to the employee's email address. Set `slack_api_token` to your
 `CREDENTIAL_MONITOR_SLACK_API_KEY`. Slack alerts POST a JSON body containing only
@@ -452,7 +453,7 @@ Run the bundled synthetic tests from this folder:
 python3 -m unittest -v
 ```
 
-Fourteen automated checks cover optional employee-name fallback, host matching, absence of raw tokens/paths in
+Automated checks cover required name/email validation, host matching, absence of raw tokens/paths in
 findings, GitHub CLI and netrc plaintext detection, unreadable/oversized files, helper
 non-execution, macOS metadata parsing, alert suppression and resolution, failed
 delivery retry state, dry-run isolation, Slack API endpoint validation, and Linux timeout

@@ -39,6 +39,33 @@ class MonitorTests(unittest.TestCase):
             self.assertEqual(m.employee_label(config, "rahul"), "rahul")
         self.assertEqual(m.employee_label({"employee": " Rahul Sharma "}, "rahul"), "Rahul Sharma")
 
+    def test_required_identity_validation_before_scanning(self):
+        for field in ("employee", "email"):
+            for value in (None, "", "  ", 123, False, []):
+                for mode in ("--dry-run", "--scheduled", "--force-alert", "--local-alert"):
+                    with self.subTest(field=field, value=value, mode=mode), tempfile.TemporaryDirectory() as tmp:
+                        config = {"employee": "Example", "email": "example@example.com"}
+                        if value is None:
+                            config.pop(field)
+                        else:
+                            config[field] = value
+                        path = Path(tmp) / "config.json"
+                        path.write_text(json.dumps(config))
+                        with patch.object(m.sys, "argv", ["monitor.py", "--config", str(path), mode]), \
+                             patch.object(m.Scan, "scan") as scan, patch("builtins.print") as output:
+                            self.assertEqual(m.main(), 3)
+                        scan.assert_not_called()
+                        self.assertIn(field, output.call_args.args[0])
+                        self.assertIn("Configuration error", output.call_args.args[0])
+
+    def test_identity_validation_lists_both_fields_and_trims_values(self):
+        for config in ({}, {"employee": None, "email": None}):
+            with self.assertRaisesRegex(m.IdentityConfigError, "employee .*email"):
+                m.validate_identity(config)
+        config = {"employee": " Example Person ", "email": " example@example.com "}
+        m.validate_identity(config)
+        self.assertEqual(config, {"employee": "Example Person", "email": "example@example.com"})
+
     def test_host_boundaries(self):
         self.assertTrue(m.host_match("git:https://github.com", {"github.com"}))
         self.assertFalse(m.host_match("https://github.com.evil.test", {"github.com"}))
@@ -304,7 +331,7 @@ class MonitorTests(unittest.TestCase):
     def test_explicit_local_alert_bypasses_state_and_never_sends_slack(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "config.json"
-            config.write_text(json.dumps({"local_alerts": False}))
+            config.write_text(json.dumps({"employee": "Example", "email": "example@example.com", "local_alerts": False}))
             with patch.object(m.Scan, "scan", side_effect=[self.report(), self.report(False)]), \
                  patch.object(m.platform, "system", return_value="Darwin"), \
                  patch.object(m, "local_notify") as local, patch.object(m, "notify") as slack, \
@@ -318,7 +345,7 @@ class MonitorTests(unittest.TestCase):
     def test_force_alert_bypasses_both_reminders(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "config.json"
-            config.write_text(json.dumps({"slack_api_url": "unused"}))
+            config.write_text(json.dumps({"employee": "Example", "email": "example@example.com", "slack_api_url": "unused"}))
             with patch.object(m.Scan, "scan", return_value=self.report()), \
                  patch.object(m.platform, "system", return_value="Darwin"), \
                  patch.object(m, "deliver") as deliver, patch.object(m, "log_scan"), patch("builtins.print"), \
@@ -378,7 +405,7 @@ class MonitorTests(unittest.TestCase):
     def test_dry_run_never_notifies_or_writes_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "config.json"
-            config.write_text(json.dumps({"employee": "Example"}))
+            config.write_text(json.dumps({"employee": "Example", "email": "example@example.com"}))
             with patch.object(m.Scan, "scan", return_value=self.report()), patch.object(m, "notify") as notify, \
                  patch.object(m.sys, "argv", ["monitor.py", "--config", str(config), "--dry-run"]), \
                  patch("builtins.print"):

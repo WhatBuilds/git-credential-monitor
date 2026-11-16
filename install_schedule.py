@@ -8,7 +8,7 @@ import platform
 import plistlib
 import subprocess
 import sys
-from monitor import reminder_minutes, validate_slack_api
+from monitor import IdentityConfigError, reminder_minutes, validate_identity, validate_slack_api
 from api_logging import validate_api
 
 LABEL = "com.whatbytes.github-credential-monitor"
@@ -50,6 +50,7 @@ def install(config):
     if not config.is_file() or not script.is_file():
         raise RuntimeError("missing files")
     settings = json.loads(config.read_text())
+    validate_identity(settings)
     validate_slack_api(settings)
     validate_api(settings)
     reminder_minutes(settings)
@@ -111,6 +112,9 @@ if __name__ == "__main__":
     options = parser.parse_args()
     try:
         install(options.config)
+    except IdentityConfigError as error:
+        print(f"Configuration error: {error}", file=sys.stderr)
+        sys.exit(1)
     except RuntimeError as error:
         # RuntimeError messages here are fixed diagnostics, not subprocess output.
         print(f"Schedule installation failed: {error}", file=sys.stderr)

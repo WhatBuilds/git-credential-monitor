@@ -16,7 +16,7 @@ def report(findings=False, incomplete=False):
 
 
 class LoggingTests(unittest.TestCase):
-    config = {'logging_api_url': 'https://logs.example.test/scans', 'logging_api_token': 'dummy'}
+    config = {'employee': 'Example', 'email': 'example@example.com', 'logging_api_url': 'https://logs.example.test/scans', 'logging_api_token': 'dummy'}
 
     def test_outcomes_and_metadata_allowlist(self):
         for found, incomplete, expected in ((False, False, 'pass'), (True, False, 'fail'),
@@ -216,7 +216,7 @@ class LoggingTests(unittest.TestCase):
             for mode in ('--dry-run', '--force-alert'):
                 with tempfile.TemporaryDirectory() as tmp:
                     path = Path(tmp) / 'config.json'
-                    path.write_text(json.dumps({'slack_api_url': 'unused', 'local_alerts': False}))
+                    path.write_text(json.dumps({'employee': 'Example', 'email': 'example@example.com', 'slack_api_url': 'unused', 'local_alerts': False}))
                     with patch.object(m.Scan, 'scan', return_value=report(found)), patch.object(m, 'log_scan') as log, \
                          patch.object(m, 'notify') as slack, patch.object(m.sys, 'argv', ['monitor.py', '--config', str(path), mode]), patch('builtins.print'):
                         self.assertEqual(m.main(), int(found))
