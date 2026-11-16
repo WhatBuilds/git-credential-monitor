@@ -198,15 +198,17 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("82 additional finding groups omitted", json.dumps(payload))
         self.assertIn("82 additional incomplete checks omitted", json.dumps(payload))
 
-    def test_notify_serializes_block_payload(self):
+    def test_notify_sends_authenticated_text_only(self):
         payload = m.slack_payload(self.report())
         with patch.object(m.urllib.request, "build_opener") as opener:
             response = opener.return_value.open.return_value.__enter__.return_value
             response.status = 200
             response.read.return_value = b"ok"
-            m.notify("https://hooks.slack.com/services/test", payload)
+            m.notify({"slack_api_url": "https://slack.example.test/send", "slack_api_token": "dummy"}, payload)
             request = opener.return_value.open.call_args.args[0]
-            self.assertEqual(json.loads(request.data), payload)
+            self.assertEqual(json.loads(request.data), {"text": payload["text"]})
+            self.assertEqual(request.get_header("Authorization"), "Bearer dummy")
+            self.assertEqual(request.method, "POST")
 
     def test_duplicate_checks_are_collapsed(self):
         scan = m.Scan({})
@@ -316,7 +318,7 @@ class MonitorTests(unittest.TestCase):
     def test_force_alert_bypasses_both_reminders(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "config.json"
-            config.write_text(json.dumps({"slack_webhook": "unused"}))
+            config.write_text(json.dumps({"slack_api_url": "unused"}))
             with patch.object(m.Scan, "scan", return_value=self.report()), \
                  patch.object(m.platform, "system", return_value="Darwin"), \
                  patch.object(m, "deliver") as deliver, patch.object(m, "log_scan"), patch("builtins.print"), \
@@ -384,11 +386,11 @@ class MonitorTests(unittest.TestCase):
                 notify.assert_not_called()
             self.assertFalse((Path(tmp) / "monitor-state.json").exists())
 
-    def test_webhook_allowlist(self):
-        for bad in ("http://hooks.slack.com/services/a", "https://evil.test/services/a",
-                    "https://hooks.slack.com.evil.test/services/a"):
+    def test_slack_api_rejects_invalid_endpoint(self):
+        for bad in ("http://example.test/send", "https://user:pass@example.test/send",
+                    "https://example.test/send#fragment", ""):
             with self.assertRaises(ValueError):
-                m.notify(bad, "example")
+                m.notify({"slack_api_url": bad, "slack_api_token": "dummy"}, {"text": "example"})
 
     def test_linux_missing_worker_is_incomplete(self):
         scan = m.Scan({"employee": "Example"})

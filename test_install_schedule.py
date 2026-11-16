@@ -13,7 +13,7 @@ class ScheduleTests(unittest.TestCase):
         interpreter.parent.mkdir(exist_ok=True)
         interpreter.with_name('pythonw.exe').touch()
         config = root / 'config.json'
-        config.write_text(json.dumps({'slack_webhook': 'unused', 'logging_api_url': 'https://logs.example.test/scans', 'reminder_minutes': 3,
+        config.write_text(json.dumps({'slack_api_url': 'https://slack.example.test/send', 'slack_api_token': 'dummy', 'logging_api_url': 'https://logs.example.test/scans', 'reminder_minutes': 3,
                                       'scan_interval_minutes': interval}))
         with patch.object(scheduler.Path, 'home', return_value=root), \
              patch.object(scheduler.platform, 'system', return_value=system), \

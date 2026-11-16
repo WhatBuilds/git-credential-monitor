@@ -25,7 +25,7 @@ from urllib.parse import urlsplit
 import urllib.request
 from keychain_remediation import Keychain, KeychainError
 from api_logging import log_scan, outcome
-from report_format import slack_payload
+from report_format import slack_payload, slack_summary
 
 MAX_FILE = 4 * 1024 * 1024
 LINUX_RETRY_DELAY = 20  # seconds before re-checking an incomplete Secret Service
@@ -341,7 +341,8 @@ class Scan:
             self.check("OS credential store", "incomplete", "unsupported operating system")
         local_user = getpass.getuser()
         return dict(timestamp=dt.datetime.now(dt.timezone.utc).isoformat(),
-                    employee=employee_label(self.config, local_user), device=socket.gethostname(),
+                    employee=employee_label(self.config, local_user), email=self.config.get("email", ""),
+                    device=socket.gethostname(),
                     local_user=local_user, os=system,
                     findings=self.findings, checks=self.checks,
                     coverage="incomplete" if any(c["status"] == "incomplete" for c in self.checks)
@@ -384,18 +385,26 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def notify(webhook, payload):
-    u = urlsplit(webhook)
-    if (u.scheme != "https" or u.hostname not in ("hooks.slack.com", "hooks.slack-gov.com")
-            or u.username or u.password or u.port not in (None, 443)
-            or not u.path.startswith("/services/")):
-        raise ValueError("invalid Slack webhook")
-    body = json.dumps(payload).encode()
-    req = urllib.request.Request(webhook, data=body, headers={"Content-Type": "application/json"})
+def validate_slack_api(config):
+    endpoint = config.get("slack_api_url", "")
+    u = urlsplit(endpoint)
+    if u.scheme != "https" or not u.hostname or u.username or u.password or u.fragment:
+        raise ValueError("slack_api_url must be an HTTPS endpoint without embedded credentials")
+    token = os.environ.get("CREDENTIAL_MONITOR_SLACK_API_KEY") or config.get("slack_api_token", "")
+    if not isinstance(token, str) or not token.strip() or "\r" in token or "\n" in token:
+        raise ValueError("Slack API token is required and must be a single line")
+    return endpoint, token
+
+
+def notify(config, payload):
+    endpoint, token = validate_slack_api(config)
+    req = urllib.request.Request(endpoint, data=json.dumps({"text": payload["text"]}).encode(),
+                                 headers={"Content-Type": "application/json",
+                                          "Authorization": "Bearer " + token}, method="POST")
     # No redirects, response/error bodies, request debugging, or URL logging.
     with urllib.request.build_opener(NoRedirect()).open(req, timeout=15) as response:
-        if response.status != 200 or response.read(64).strip() != b"ok":
-            raise RuntimeError("Slack did not acknowledge notification")
+        if not 200 <= response.status < 300:
+            raise RuntimeError("Slack API did not acknowledge notification")
 
 
 def local_dialog(message, action="OK"):
@@ -413,7 +422,7 @@ def local_dialog(message, action="OK"):
     return result.stdout.strip() == "confirmed"
 
 
-def local_notify(_webhook, report, hosts=None):
+def local_notify(_destination, report, hosts=None):
     """Offer deletion only for the exact Keychain items shown and confirmed."""
     if not report["findings"]:
         return
@@ -461,7 +470,7 @@ def local_notify(_webhook, report, hosts=None):
         raise RuntimeError("Some Keychain entries could not be removed")
 
 
-def deliver(report, config, state_path, webhook, force=False, sender=None):
+def deliver(report, config, state_path, destination, force=False, sender=None):
     try:
         state = json.loads(state_path.read_text())
     except (OSError, ValueError):
@@ -477,9 +486,9 @@ def deliver(report, config, state_path, webhook, force=False, sender=None):
     if not due:
         return False
     if sender is None:
-        notify(webhook, slack_payload(report, resolved=not issues and state.get("had_issues", False)))
+        notify(config, {"text": slack_summary(report, resolved=not issues and state.get("had_issues", False))})
     else:
-        sender(webhook, report)
+        sender(destination, report)
     # Only acknowledge after delivery succeeds; failures retry next scheduled run.
     state_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temp = state_path.with_suffix(".tmp")
@@ -503,10 +512,10 @@ def scheduled_report(report, config, config_path):
     try:
         state = folder / "monitor-scheduled-state.json"
         if outcome(report) != "pass":
-            webhook = os.environ.get("GITHUB_MONITOR_SLACK_WEBHOOK") or config.get("slack_webhook")
-            if not webhook:
-                raise ValueError("Slack webhook required for failed verification")
-            sent = deliver(report, config, state, webhook)
+            destination = config.get("slack_api_url")
+            if not destination:
+                raise ValueError("Slack API URL required for failed verification")
+            sent = deliver(report, config, state, destination)
             print("Failure alert delivered." if sent else "Duplicate failure alert suppressed.")
         else:
             # Reset suppression silently, so a recurrence triggers a fresh alert.
@@ -567,8 +576,8 @@ def main():
                 local_report = dict(report, checks=[])
                 try:
                     deliver(local_report, config, local_state, None, force=a.force_alert,
-                            sender=lambda webhook, value: local_notify(
-                                webhook, value, {"github.com", *config.get("github_hosts", [])}))
+                            sender=lambda destination, value: local_notify(
+                                destination, value, {"github.com", *config.get("github_hosts", [])}))
                 except Exception:
                     print("Local alert or cleanup could not complete; check the desktop session and Keychain permissions.", file=sys.stderr)
                 # Include successful or partial cleanup in Slack and the exit status.
@@ -585,13 +594,13 @@ def main():
                 except Exception:
                     print("API logging failed; saved events will retry. Slack delivery will still be attempted.", file=sys.stderr)
                     api_failed = True
-            webhook = os.environ.get("GITHUB_MONITOR_SLACK_WEBHOOK") or config.get("slack_webhook")
-            if not webhook:
-                print("No Slack webhook configured. Use --dry-run or configure reporting.", file=sys.stderr)
+            destination = config.get("slack_api_url")
+            if not destination:
+                print("No Slack API URL configured. Use --dry-run or configure reporting.", file=sys.stderr)
                 return 3
             state = a.config.expanduser().resolve().with_name("monitor-state.json")
             try:
-                sent = deliver(report, config, state, webhook, a.force_alert)
+                sent = deliver(report, config, state, destination, a.force_alert)
                 print("Report delivered." if sent else "Scan completed; duplicate/empty alert suppressed.")
             except Exception:
                 print("Slack delivery or state update failed; no successful delivery state recorded. Check connectivity/configuration.", file=sys.stderr)

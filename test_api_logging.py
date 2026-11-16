@@ -8,7 +8,7 @@ import monitor as m
 
 
 def report(findings=False, incomplete=False):
-    return dict(timestamp='2026-11-12T00:00:00+00:00', employee='Example', device='test',
+    return dict(timestamp='2026-11-12T00:00:00+00:00', employee='Example', email='example@example.com', device='test',
                 local_user='example', os='Linux',
                 coverage='incomplete' if incomplete else 'configured checks completed',
                 findings=[dict(source='Store', kind='Credential present', count=1)] if findings else [],
@@ -28,14 +28,15 @@ class LoggingTests(unittest.TestCase):
             self.assertNotIn('private', json.dumps(event))
             self.assertEqual(event['mode'], 'scheduled')
 
-    def test_five_field_contract_and_incomplete_is_not_pass(self):
+    def test_six_field_contract_and_incomplete_is_not_pass(self):
         from report_format import report_log
         for found, incomplete in ((False, False), (True, False), (False, True), (True, True)):
             r = report(found, incomplete)
             payload = api.api_payload(api.event_for(r))
-            self.assertEqual(set(payload), {'user_name', 'device', 'status', 'log', 'scanned_at'})
+            self.assertEqual(set(payload), {'user_name', 'email', 'device', 'status', 'log', 'scanned_at'})
             self.assertEqual(payload['status'], 'fail' if found or incomplete else 'pass')
             self.assertEqual(payload['user_name'], r['employee'])
+            self.assertEqual(payload['email'], r['email'])
             self.assertEqual(payload['device'], r['device'])
             self.assertEqual(payload['scanned_at'], r['timestamp'])
             self.assertEqual(payload['log'], report_log(r))
@@ -51,7 +52,7 @@ class LoggingTests(unittest.TestCase):
                  reason='GitHub CLI credential helper is configured; not executed')])
         self.assertEqual(api.api_payload(api.event_for(r))['status'], 'fail')
         with tempfile.TemporaryDirectory() as tmp, patch.object(m, 'log_scan'), patch.object(m, 'notify') as slack, patch('builtins.print'):
-            self.assertFalse(m.scheduled_report(r, dict(self.config, slack_webhook='unused'), Path(tmp) / 'config.json'))
+            self.assertFalse(m.scheduled_report(r, dict(self.config, slack_api_url='unused'), Path(tmp) / 'config.json'))
             slack.assert_called_once()
             self.assertIn('Verification failed', slack.call_args.args[1]['text'])
 
@@ -87,10 +88,84 @@ class LoggingTests(unittest.TestCase):
             request = opener.return_value.open.call_args.args[0]
             self.assertEqual(request.get_header('Authorization'), 'Bearer environment-test-key')
 
+    def test_slack_summary_is_compact_and_logs_keep_detail(self):
+        from report_format import slack_summary, report_log
+        r = report(True, True)
+        r['findings'] *= 8
+        r['checks'] *= 6
+        summary = slack_summary(r)
+        self.assertIn('*Employee:* Example • *Device:* test', summary)
+        self.assertIn('8 finding groups • 6 incomplete checks', summary)
+        self.assertIn('+5 more finding groups', summary)
+        self.assertIn('+4 more incomplete checks', summary)
+        self.assertEqual(summary.count('• Store:'), 3)
+        self.assertEqual(summary.count('• Check:'), 2)
+        self.assertLess(len(summary), len(report_log(r)))
+        self.assertEqual(api.api_payload(api.event_for(r))['log'], report_log(r))
+
+    def test_slack_summary_status_and_dynamic_text(self):
+        from report_format import slack_summary
+        r = report()
+        self.assertIn('PASS', slack_summary(r))
+        self.assertIn('Findings cleared', slack_summary(r, resolved=True))
+        r['coverage'] = 'incomplete'
+        self.assertIn('FAIL', slack_summary(r, resolved=True))
+        r['employee'] = '<!channel> *name*\nInjected line'
+        summary = slack_summary(r)
+        self.assertNotIn('<!channel>', summary)
+        self.assertIn('&lt;!channel&gt;', summary)
+        self.assertNotIn('*name*', summary)
+        self.assertNotIn('\nInjected line', summary)
+
+    def test_delivery_uses_compact_summary(self):
+        from report_format import slack_summary
+        r = report(True)
+        with tempfile.TemporaryDirectory() as tmp, patch.object(m, 'notify') as notify:
+            m.deliver(r, self.config, Path(tmp) / 'state.json', None, force=True)
+            self.assertEqual(notify.call_args.args[1], {'text': slack_summary(r)})
+
+    def test_legacy_email_fallback_and_captured_email_preservation(self):
+        for legacy in (True, False):
+            event = api.event_for(report())
+            if legacy:
+                del event['report']['email']
+            config = dict(self.config, email='current@example.com')
+            with patch.object(api.urllib.request, 'build_opener') as opener:
+                opener.return_value.open.return_value.__enter__.return_value.status = 201
+                api.post_event(config, event)
+                payload = json.loads(opener.return_value.open.call_args.args[0].data)
+                self.assertEqual(payload['email'], 'current@example.com' if legacy else 'example@example.com')
+
+    def test_slack_api_environment_auth_and_acknowledgment(self):
+        config = {'slack_api_url': 'https://slack.example.test/send', 'slack_api_token': 'config-key'}
+        with patch.object(m.urllib.request, 'build_opener') as opener, \
+             patch.dict(m.os.environ, {'CREDENTIAL_MONITOR_SLACK_API_KEY': 'env-key'}, clear=True):
+            response = opener.return_value.open.return_value.__enter__.return_value
+            for status in (200, 201, 204):
+                response.status = status
+                m.notify(config, {'text': 'Full report'})
+                request = opener.return_value.open.call_args.args[0]
+                self.assertEqual(request.full_url, config['slack_api_url'])
+                self.assertEqual(request.get_header('Authorization'), 'Bearer env-key')
+                self.assertEqual(json.loads(request.data), {'text': 'Full report'})
+            for status in (302, 401, 500):
+                response.status = status
+                with self.assertRaises(RuntimeError):
+                    m.notify(config, {'text': 'Full report'})
+            response.read.assert_not_called()
+
+    def test_slack_api_requires_valid_token(self):
+        with patch.dict(m.os.environ, {}, clear=True), patch.object(m.urllib.request, 'build_opener') as opener:
+            for token in ('', ' ', 'key\r\nInjected: value', None):
+                with self.assertRaises(ValueError):
+                    m.notify({'slack_api_url': 'https://slack.example.test/send',
+                              'slack_api_token': token}, {'text': 'Full report'})
+            opener.assert_not_called()
+
     def test_force_alert_api_failure_still_sends_slack(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'config.json'
-            path.write_text(json.dumps(dict(self.config, slack_webhook='unused', local_alerts=False)))
+            path.write_text(json.dumps(dict(self.config, slack_api_url='unused', local_alerts=False)))
             with patch.object(m.Scan, 'scan', return_value=report(True)), \
                  patch.object(m, 'log_scan', side_effect=OSError), patch.object(m, 'notify') as slack, \
                  patch.object(m.sys, 'argv', ['monitor.py', '--config', str(path), '--force-alert']), patch('builtins.print'):
@@ -110,7 +185,7 @@ class LoggingTests(unittest.TestCase):
     def test_scheduled_alerts_findings_and_incomplete_verification(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(m, 'log_scan') as log, patch.object(m, 'notify') as slack, patch('builtins.print'):
             path = Path(tmp) / 'config.json'
-            config = dict(self.config, slack_webhook='unused')
+            config = dict(self.config, slack_api_url='unused')
             self.assertFalse(m.scheduled_report(report(True), config, path))
             self.assertFalse(m.scheduled_report(report(), config, path))
             self.assertFalse(m.scheduled_report(report(False, True), config, path))
@@ -121,14 +196,14 @@ class LoggingTests(unittest.TestCase):
 
     def test_api_failure_does_not_block_slack(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(m, 'log_scan', side_effect=OSError), patch.object(m, 'notify') as slack, patch('builtins.print'):
-            self.assertTrue(m.scheduled_report(report(True), dict(self.config, slack_webhook='unused'), Path(tmp) / 'config.json'))
+            self.assertTrue(m.scheduled_report(report(True), dict(self.config, slack_api_url='unused'), Path(tmp) / 'config.json'))
             slack.assert_called_once()
 
     def test_scheduled_cli_on_all_platforms(self):
         for system in ('Darwin', 'Linux', 'Windows'):
             with tempfile.TemporaryDirectory() as tmp:
                 path = Path(tmp) / 'config.json'
-                path.write_text(json.dumps(dict(self.config, slack_webhook='unused', local_alerts=False)))
+                path.write_text(json.dumps(dict(self.config, slack_api_url='unused', local_alerts=False)))
                 with patch.object(m.platform, 'system', return_value=system), patch.object(m.Scan, 'scan', return_value=report()), \
                      patch.object(m, 'log_scan') as log, patch.object(m, 'notify') as slack, \
                      patch.object(m.sys, 'argv', ['monitor.py', '--config', str(path), '--scheduled']), patch('builtins.print'):
@@ -141,7 +216,7 @@ class LoggingTests(unittest.TestCase):
             for mode in ('--dry-run', '--force-alert'):
                 with tempfile.TemporaryDirectory() as tmp:
                     path = Path(tmp) / 'config.json'
-                    path.write_text(json.dumps({'slack_webhook': 'unused', 'local_alerts': False}))
+                    path.write_text(json.dumps({'slack_api_url': 'unused', 'local_alerts': False}))
                     with patch.object(m.Scan, 'scan', return_value=report(found)), patch.object(m, 'log_scan') as log, \
                          patch.object(m, 'notify') as slack, patch.object(m.sys, 'argv', ['monitor.py', '--config', str(path), mode]), patch('builtins.print'):
                         self.assertEqual(m.main(), int(found))

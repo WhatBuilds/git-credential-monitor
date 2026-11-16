@@ -31,7 +31,9 @@ Edit `config.json` locally using a text editor:
 ```json
 {
   "employee": "",
-  "slack_webhook": "PASTE_YOUR_SLACK_INCOMING_WEBHOOK_HERE",
+  "email": "employee@example.com",
+  "slack_api_url": "https://whatscripts.genricai.com/api/v1/credential-monitor/slack",
+  "slack_api_token": "",
   "github_hosts": [],
   "reminder_minutes": 15,
   "scan_interval_minutes": 1,
@@ -47,11 +49,13 @@ the report uses the current OS username (for example, `rahul`). A nonempty name
 overrides this label. Run the scanner and installer as the employee so the
 detected username and inspected credential stores belong to that person.
 
-Create an Incoming Webhook for your chosen Slack channel and paste its HTTPS
-URL into the config. No GitHub credential is needed to run this monitor. The
-webhook itself is a Slack posting credential: protect the config and distribute
-it privately. Each endpoint receives this posting capability; for stronger fleet
-control, replace direct webhook delivery with an authenticated central collector.
+Set `email` to the employee's email address. Set `slack_api_token` to your
+`CREDENTIAL_MONITOR_SLACK_API_KEY`. Slack alerts POST a JSON body containing only
+`text` (a compact formatted summary) to `slack_api_url`, with bearer authentication.
+The process environment variable `CREDENTIAL_MONITOR_SLACK_API_KEY` overrides the
+config token. The Slack API must return HTTP 2xx; redirects are rejected.
+No GitHub credential is needed to run this monitor. Protect the config and
+distribute it privately because it contains API posting credentials.
 
 First inspect the report without sending anything:
 
@@ -248,10 +252,10 @@ Set `logging_api_token` if it requires bearer authentication. Alternatively,
 schedulers generally do not inherit terminal environment variables. Protect the
 config file, which may now contain both API and Slack credentials.
 
-Each scheduled or forced scan POSTs five JSON fields: `user_name`, `device`, `status`,
+Each scheduled or forced scan POSTs six JSON fields: `user_name`, `email`, `device`, `status`,
 `log`, and `scanned_at`. The status is `pass` only for complete scans without
-findings; it is `fail` for findings or incomplete checks. The log is the text
-version of the Slack report, including its visible size limits. Scheduled Slack
+findings; it is `fail` for findings or incomplete checks. The log retains the detailed report. Slack receives a compact summary with up to
+three finding groups and two incomplete checks, plus counts of omitted items. Scheduled Slack
 alerts trigger for credentials found or incomplete verification.
 
 Implement `POST /api/v1/credential-monitor/logs` in your other project. See
@@ -271,7 +275,7 @@ acknowledgment. API errors leave saved events for the next scheduled or force-al
 Slack delivery is attempted independently. The queue can grow during an extended
 outage; monitor local disk space. A disk-write failure cannot preserve that scan.
 Queued metadata includes employee/device identifiers but no credential values,
-item references, API tokens, or webhook URLs. Do not run overlapping manual
+item references, API tokens, or authenticated endpoint URLs. Do not run overlapping manual
 `--scheduled` invocations with the installed schedule.
 
 The local config now points to
@@ -350,9 +354,10 @@ token values or hashes derived from token values. Delete it to reset suppression
 The next scan may send a fresh alert. Avoid overlapping manual invocations using
 the same config; scheduled instances use the OS scheduler's single-job behavior.
 
-For manual runs, `GITHUB_MONITOR_SLACK_WEBHOOK` can override the config webhook.
-The schedule installer requires a config webhook because desktop schedulers
-generally do not inherit an interactive terminal's environment.
+For scheduled runs, store `slack_api_token` in the protected config because desktop
+schedulers generally do not inherit an interactive terminal's environment.
+The installer validates the Slack API URL and requires its token. Existing webhook
+configs must migrate to `slack_api_url` and `slack_api_token`.
 
 Exit codes: `0` configured checks completed without findings, `1` findings,
 `2` incomplete coverage (possibly with findings), `3` configuration/delivery
@@ -431,7 +436,7 @@ schtasks /Delete /TN "WhatBytes GitHub Credential Monitor" /F
 ```
 
 After stopping the schedule, delete the extracted folder and local config if no
-longer needed. Rotate the Slack webhook if an endpoint or config is compromised.
+longer needed. Rotate the Slack API token if an endpoint or config is compromised.
 
 ## Validation and rollout
 
@@ -444,7 +449,7 @@ python3 -m unittest -v
 Fourteen automated checks cover optional employee-name fallback, host matching, absence of raw tokens/paths in
 findings, GitHub CLI and netrc plaintext detection, unreadable/oversized files, helper
 non-execution, macOS metadata parsing, alert suppression and resolution, failed
-delivery retry state, dry-run isolation, webhook allowlisting, and Linux timeout
+delivery retry state, dry-run isolation, Slack API endpoint validation, and Linux timeout
 handling. These tests use fixtures/mocks; they do not establish native OS API
 compatibility or Slack delivery.
 

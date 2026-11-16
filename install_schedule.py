@@ -8,7 +8,7 @@ import platform
 import plistlib
 import subprocess
 import sys
-from monitor import reminder_minutes
+from monitor import reminder_minutes, validate_slack_api
 from api_logging import validate_api
 
 LABEL = "com.whatbytes.github-credential-monitor"
@@ -50,8 +50,7 @@ def install(config):
     if not config.is_file() or not script.is_file():
         raise RuntimeError("missing files")
     settings = json.loads(config.read_text())
-    if not settings.get("slack_webhook"):
-        raise RuntimeError("set slack_webhook in config before scheduling")
+    validate_slack_api(settings)
     validate_api(settings)
     reminder_minutes(settings)
     interval = settings.get("scan_interval_minutes", 1)
@@ -94,7 +93,7 @@ def install(config):
         command(["systemctl", "--user", "enable", LABEL + ".timer"])
         command(["systemctl", "--user", "restart", LABEL + ".timer"])
     elif system == "Windows":
-        # Current logged-on user; never SYSTEM. No webhook in task arguments.
+        # Current logged-on user; never SYSTEM. No API tokens in task arguments.
         args[0] = windows_background_python(sys.executable)
         command(["schtasks", "/Create", "/TN", "WhatBytes GitHub Credential Monitor",
                  "/SC", "MINUTE", "/MO", str(interval), "/IT", "/TR",

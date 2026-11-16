@@ -37,6 +37,7 @@ def event_for(report, mode="scheduled"):
     # Explicit allowlist keeps future local-only metadata out of remote logging.
     inventory = {key: report[key] for key in (
         'timestamp', 'employee', 'device', 'local_user', 'os', 'coverage')}
+    inventory['email'] = report.get('email', '')
     inventory['findings'] = [{key: f[key] for key in ('source', 'kind', 'count')}
                              for f in report['findings']]
     inventory['checks'] = [{key: c[key] for key in ('source', 'status', 'reason') if key in c}
@@ -46,10 +47,11 @@ def event_for(report, mode="scheduled"):
 
 
 def api_payload(event):
-    """Five business fields; the stable event UUID travels in the HTTP header."""
+    """Six business fields; the stable event UUID travels in the HTTP header."""
     report = event['report']
     return {
         'user_name': report['employee'],
+        'email': report.get('email', ''),
         'device': report['device'],
         'status': 'pass' if outcome(report) == 'pass' else 'fail',
         'log': report_log(report),
@@ -64,7 +66,11 @@ def post_event(config, event):
              os.environ.get('GITHUB_MONITOR_API_TOKEN') or config.get('logging_api_token'))
     if token:
         headers['Authorization'] = 'Bearer ' + token
-    request = urllib.request.Request(endpoint, data=json.dumps(api_payload(event)).encode(), headers=headers, method='POST')
+    # Legacy queued events were created before email was captured at scan time.
+    report = dict(event['report'])
+    report.setdefault('email', config.get('email', ''))
+    payload = api_payload(dict(event, report=report))
+    request = urllib.request.Request(endpoint, data=json.dumps(payload).encode(), headers=headers, method='POST')
     with urllib.request.build_opener(NoRedirect()).open(request, timeout=15) as response:
         if not 200 <= response.status < 300:
             raise RuntimeError('Logging API did not acknowledge event')

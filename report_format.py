@@ -96,13 +96,53 @@ def slack_payload(report, resolved=False):
 
 
 
-def report_log(report):
+def report_log(report, resolved=False):
     """Text equivalent of the Slack report, including its visible size limits."""
     sections = []
-    for block in slack_payload(report)["blocks"]:
+    for block in slack_payload(report, resolved=resolved)["blocks"]:
         text = block.get("text")
         if text:
             sections.append(text["text"].strip("*") if text["type"] == "mrkdwn" else text["text"])
         sections.extend(field["text"] for field in block.get("fields", []))
         sections.extend(element["text"] for element in block.get("elements", []))
     return "\n\n".join(sections)
+
+
+def slack_summary(report, resolved=False):
+    """Compact mrkdwn text for the Slack relay; full detail stays in API logs."""
+    def text(value, limit=100):
+        # Keep user-controlled values on one line and prevent Slack mentions/markup.
+        value = " ".join(str(value).split())
+        value = value.translate(str.maketrans({"*": "＊", "_": "＿", "`": "′", "~": "～"}))
+        value = value[:limit - 1] + "…" if len(value) > limit else value
+        return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    findings = report["findings"]
+    incomplete = [c for c in report["checks"] if c["status"] == "incomplete"]
+    if findings:
+        status = "⚠️ FAIL — Credentials found"
+    elif incomplete or report["coverage"] == "incomplete":
+        status = "⚠️ FAIL — Verification failed (checks incomplete)"
+    elif resolved:
+        status = "✅ Findings cleared in configured checks"
+    else:
+        status = "✅ PASS — No findings in configured checks"
+    lines = [f"*GitHub credential monitor | {status}*",
+             f"*Employee:* {text(report['employee'], 60)} • *Device:* {text(report['device'], 60)}"]
+    if findings or incomplete:
+        lines.append(f"*Summary:* {len(findings)} finding groups • {len(incomplete)} incomplete checks")
+    for finding in findings[:3]:
+        lines.append(f"• {text(finding['source'], 65)}: {text(finding['kind'], 65)} (count: {text(finding['count'], 10)})")
+    if len(findings) > 3:
+        lines.append(f"• +{len(findings) - 3} more finding groups")
+    for check in incomplete[:2]:
+        lines.append(f"• Check: {text(check['source'], 50)} — {text(check.get('reason', 'Not completed'), 90)}")
+    if len(incomplete) > 2:
+        lines.append(f"• +{len(incomplete) - 2} more incomplete checks")
+    if findings:
+        lines.append("*Next:* Review stored credentials locally and rerun the scan.")
+    elif incomplete or report["coverage"] == "incomplete":
+        lines.append("*Next:* Review incomplete checks and rerun; credentials may remain.")
+    lines.append(f"*Scanned:* {text(report['timestamp'], 40)}")
+    lines.append("Full details in scan logs.")
+    return "\n".join(lines)
