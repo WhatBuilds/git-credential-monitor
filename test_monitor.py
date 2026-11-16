@@ -526,9 +526,79 @@ class SshKeyTests(unittest.TestCase):
             "Host * !github.com\n  IdentityFile ~/.ssh/not_for_github\n"
             "Host github.com\n  IdentityFile ~/.ssh/%r_key\n")
         self.assertIn(".ssh/work", paths)
-        self.assertNotIn(".ssh/not_for_github", paths)
+        self.assertIn(".ssh/not_for_github", paths)  # Applies to gh-work alias.
         self.assertTrue(keychain)
         self.assertTrue(unexpanded)
+
+    def test_defaults_resolved_per_destination(self):
+        paths, _, _ = self.identities(
+            "Host github.com\n IdentityFile ~/.ssh/protected\n",
+            hosts=("github.com", "ssh.github.com"))
+        self.assertIn(".ssh/protected", paths)
+        self.assertIn(".ssh/id_ed25519", paths)
+
+    def test_alias_inherits_other_matching_blocks(self):
+        paths, _, _ = self.identities(
+            "Host gh-work\n HostName github.com\n"
+            "Host gh-*\n IdentityFile ~/.ssh/work\n")
+        self.assertIn(".ssh/work", paths)
+
+    def test_identity_none_suppresses_defaults(self):
+        paths, _, _ = self.identities("Host *\n IdentityFile none\n")
+        self.assertEqual(paths, [])
+        paths, _, _ = self.identities(
+            "Host *\n IdentityFile none\n IdentityFile ~/.ssh/explicit\n")
+        self.assertEqual(paths, [".ssh/explicit"])
+
+    def test_conditional_nested_include_and_parent_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            ssh_dir = home / ".ssh"
+            ssh_dir.mkdir()
+            (ssh_dir / "excluded").write_text("Host *\n IdentityFile ~/.ssh/unrelated\n")
+            (ssh_dir / "nested").write_text("Host *\n IdentityFile ~/.ssh/nested_key\n")
+            (ssh_dir / "included").write_text(
+                "Include nested\nHost unrelated\n IdentityFile ~/.ssh/also_unrelated\n")
+            (ssh_dir / "config").write_text(
+                "Host unrelated\n Include excluded\n"
+                "Host github.com\n Include included\n IdentityFile ~/.ssh/github\n")
+            paths, _, _ = m.ssh_github_identities(
+                m.ssh_config_lines(ssh_dir / "config", ssh_dir), {"github.com"}, home, "me")
+            self.assertEqual([p.name for p in paths], ["nested_key", "github"])
+
+    def test_scan_detects_default_key_for_second_destination(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ssh_dir = Path(tmp) / ".ssh"
+            ssh_dir.mkdir()
+            (ssh_dir / "config").write_text("Host github.com\n IdentityFile ~/.ssh/protected\n")
+            (ssh_dir / "protected").write_bytes(fake_openssh_key(b"aes256-ctr"))
+            (ssh_dir / "id_ed25519").write_bytes(fake_openssh_key())
+            scan = m.Scan({})
+            scan.ssh(home=tmp, user="me")
+            self.assertEqual(len(scan.findings), 1)
+            self.assertEqual(scan.findings[0]["count"], 1)
+
+    def test_empty_agent_is_successfully_checked(self):
+        scan = m.Scan({})
+        with patch.object(m.platform, "system", return_value="Linux"), \
+             patch.dict(m.os.environ, {"SSH_AUTH_SOCK": "/tmp/agent"}), \
+             patch.object(m.shutil, "which", return_value="/usr/bin/ssh-add"), \
+             patch.object(m, "run", return_value=Mock(returncode=1, stdout="")):
+            scan.ssh_agent()
+        self.assertEqual(scan.findings, [])
+        self.assertEqual(scan.checks, [dict(source="SSH agent", status="checked")])
+
+    def test_agent_errors_mark_scan_incomplete(self):
+        for failure in (OSError("private details"), m.subprocess.TimeoutExpired("ssh-add", 10)):
+            with self.subTest(failure=type(failure).__name__):
+                scan = m.Scan({})
+                with patch.object(m.platform, "system", return_value="Linux"), \
+                     patch.dict(m.os.environ, {"SSH_AUTH_SOCK": "/tmp/agent"}), \
+                     patch.object(m.shutil, "which", return_value="/usr/bin/ssh-add"), \
+                     patch.object(m, "run", side_effect=failure):
+                    scan.ssh_agent()
+                self.assertTrue(any(c["status"] == "incomplete" for c in scan.checks))
+                self.assertNotIn("private details", json.dumps(scan.checks))
 
     def test_scan_reports_counts_never_names(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -565,7 +635,7 @@ class SshKeyTests(unittest.TestCase):
              patch.object(m, "run", return_value=Mock(returncode=2, stdout="")):
             scan.ssh_agent()
         self.assertEqual(scan.findings, [])
-        self.assertEqual(scan.checks, [dict(source="SSH agent", status="checked")])
+        self.assertTrue(any(c["status"] == "incomplete" for c in scan.checks))
 
 
 if __name__ == "__main__":

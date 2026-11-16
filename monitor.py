@@ -142,7 +142,7 @@ def ssh_key_state(data):
 
 
 def ssh_config_lines(path, ssh_dir, depth=0):
-    """Parse an OpenSSH client config into (keyword, args), inlining Include.
+    """Parse client config into (keyword, args), retaining Include subtrees.
 
     Only reads files; Match exec, ProxyCommand and similar are never run.
     Raises ValueError when an Include chain is too deep.
@@ -172,7 +172,7 @@ def ssh_config_lines(path, ssh_dir, depth=0):
                 if not os.path.isabs(pattern):
                     pattern = str(Path(ssh_dir) / pattern)  # relative to ~/.ssh, as ssh does
                 for included in sorted(Path(p) for p in glob.glob(pattern)):
-                    lines += ssh_config_lines(included, ssh_dir, depth + 1)
+                    lines.append(("include", ssh_config_lines(included, ssh_dir, depth + 1)))
         else:
             lines.append((keyword, args))
     return lines
@@ -181,42 +181,54 @@ def ssh_config_lines(path, ssh_dir, depth=0):
 def ssh_github_identities(lines, hosts, home, user):
     """Resolve which identity files OpenSSH would offer to the GitHub hosts.
 
-    Returns (paths, use_keychain, unexpanded). Host blocks count when a pattern
-    matches a GitHub host, or when they alias one via HostName. Match blocks are
-    assumed to apply (conditions are never evaluated). Like ssh, the default
-    id_* keys are used only where no IdentityFile applies.
+    Returns (paths, use_keychain, unexpanded). Resolve each GitHub host and
+    literal Host alias using all matching blocks and conditional includes.
+    Match blocks are assumed to apply (conditions are never evaluated).
+    Default id_* keys apply per destination only without an IdentityFile;
+    IdentityFile none explicitly suppresses them.
     """
-    blocks = [("global", [], [])]
-    for keyword, args in lines:
-        if keyword in ("host", "match"):
-            blocks.append((keyword, args, []))
-        else:
-            blocks[-1][2].append((keyword, args))
-
     def host_matches(patterns, name):
         positive = [p for p in patterns if not p.startswith("!")]
         negative = [p[1:] for p in patterns if p.startswith("!")]
-        return (any(fnmatch.fnmatch(name, p.lower()) for p in positive)
-                and not any(fnmatch.fnmatch(name, p.lower()) for p in negative))
+        return (any(fnmatch.fnmatchcase(name, p.lower()) for p in positive)
+                and not any(fnmatch.fnmatchcase(name, p.lower()) for p in negative))
 
-    direct, alias_ids, alias_without_ids, use_keychain = [], [], False, False
-    for kind, patterns, settings in blocks:
-        hostname = next((a[0].lower() for k, a in settings if k == "hostname" and a), None)
-        ids = [a[0] for k, a in settings if k == "identityfile" and a and a[0].lower() != "none"]
-        is_direct = kind in ("global", "match") or any(host_matches(patterns, h) for h in hosts)
-        is_alias = kind == "host" and not is_direct and hostname in hosts
-        if not (is_direct or is_alias):
+    def candidates(entries):
+        for keyword, args in entries:
+            if keyword == "include":
+                yield from candidates(args)
+            elif keyword == "host":
+                for pattern in args:
+                    if not any(c in pattern for c in "!*?["):
+                        yield pattern.lower()
+
+    def settings_for(entries, name):
+        active = True
+        for keyword, args in entries:
+            if keyword == "host":
+                active = host_matches(args, name)
+            elif keyword == "match":
+                active = True  # Conservative: never execute Match conditions.
+            elif active and keyword == "include":
+                # Included Host/Match directives do not change the parent's state.
+                yield from settings_for(args, name)
+            elif active:
+                yield keyword, args
+
+    chosen, use_keychain = [], False
+    for name in sorted(set(hosts) | set(candidates(lines))):
+        settings = list(settings_for(lines, name))
+        hostname = next((a[0].lower() for k, a in settings if k == "hostname" and a), name)
+        if hostname not in hosts:
             continue
-        if any(k == "usekeychain" and a and a[0].lower() == "yes" for k, a in settings):
-            use_keychain = True
-        if is_direct:
-            direct += ids
-        else:
-            alias_ids += ids
-            alias_without_ids = alias_without_ids or not ids
-    chosen = direct + alias_ids
-    if not direct or alias_without_ids:
-        chosen += ["~/.ssh/" + name for name in SSH_DEFAULT_KEYS]
+        # Resolve the complete configuration separately for each destination.
+        # "none" counts as an explicit IdentityFile, suppressing defaults.
+        ids = [a[0] for k, a in settings if k == "identityfile" and a]
+        chosen.extend(value for value in ids if value.lower() != "none")
+        if not ids:
+            chosen.extend("~/.ssh/" + key for key in SSH_DEFAULT_KEYS)
+        keychain = next((a[0].lower() for k, a in settings if k == "usekeychain" and a), "no")
+        use_keychain = use_keychain or keychain == "yes"
 
     paths, unexpanded = [], False
     for value in dict.fromkeys(chosen):  # de-duplicate, keep order
@@ -570,8 +582,11 @@ class Scan:
             try:
                 r = run(argv, timeout=10)
             except (OSError, subprocess.SubprocessError):
+                self.check(source, "incomplete", "SSH agent could not be inspected")
                 continue
-            if r.returncode == 0:  # 1: agent has no keys, 2: no agent running
+            if r.returncode not in (0, 1):
+                self.check(source, "incomplete", "SSH agent could not be contacted")
+            if r.returncode == 0:  # 1: agent has no keys, 2: cannot contact agent
                 # Count only; output lines carry fingerprints and key comments.
                 keys = max(keys, sum(1 for line in r.stdout.splitlines() if line.strip()))
         if keys:
