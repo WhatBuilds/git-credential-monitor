@@ -117,6 +117,24 @@ class LoggingTests(unittest.TestCase):
         self.assertNotIn('*name*', summary)
         self.assertNotIn('\nInjected line', summary)
 
+    def test_slack_mention_only_on_fail_with_valid_id(self):
+        from report_format import slack_summary
+        fail, ok = report(True), report()
+        self.assertTrue(slack_summary(fail, slack_user_id='U01ABC234').startswith('<@U01ABC234> *GitHub'))
+        incomplete = report(False, True)
+        self.assertIn('<@U01ABC234>', slack_summary(incomplete, slack_user_id='U01ABC234'))
+        self.assertNotIn('<@', slack_summary(ok, slack_user_id='U01ABC234'))
+        self.assertNotIn('<@', slack_summary(ok, resolved=True, slack_user_id='U01ABC234'))
+        for bad in ('', None, '@soham', 'U1>', '<!channel>', 'u01abc234'):
+            self.assertNotIn('<', slack_summary(fail, slack_user_id=bad))
+
+    def test_slack_user_id_config_validation(self):
+        base = {'employee': 'A', 'email': 'a@b.c'}
+        m.validate_identity(dict(base, slack_user_id=''))
+        m.validate_identity(dict(base, slack_user_id=' U01ABC234 '))
+        with self.assertRaises(m.IdentityConfigError):
+            m.validate_identity(dict(base, slack_user_id='@soham'))
+
     def test_delivery_uses_compact_summary(self):
         from report_format import slack_summary
         r = report(True)

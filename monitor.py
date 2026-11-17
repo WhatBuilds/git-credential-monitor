@@ -30,7 +30,7 @@ from urllib.parse import urlsplit
 import urllib.request
 from keychain_remediation import Keychain, KeychainError
 from api_logging import log_scan, outcome
-from report_format import slack_payload, slack_summary
+from report_format import SLACK_USER_ID, slack_payload, slack_summary
 
 MAX_FILE = 4 * 1024 * 1024
 LINUX_RETRY_DELAY = 20  # seconds before re-checking an incomplete Secret Service
@@ -77,6 +77,11 @@ def validate_identity(config):
         raise IdentityConfigError("Required config fields missing or blank: " + ", ".join(missing))
     for field in ("employee", "email"):
         config[field] = config[field].strip()
+    uid = config.get("slack_user_id")
+    if uid is not None and not (isinstance(uid, str) and (not uid.strip() or SLACK_USER_ID.fullmatch(uid.strip()))):
+        raise IdentityConfigError("slack_user_id must be a Slack member ID such as U01ABC234")
+    if isinstance(uid, str):
+        config["slack_user_id"] = uid.strip()
 
 
 def employee_label(config, local_user):
@@ -794,7 +799,8 @@ def deliver(report, config, state_path, destination, force=False, sender=None):
     if not due:
         return False
     if sender is None:
-        notify(config, {"text": slack_summary(report, resolved=not issues and state.get("had_issues", False))})
+        notify(config, {"text": slack_summary(report, resolved=not issues and state.get("had_issues", False),
+                                              slack_user_id=config.get("slack_user_id"))})
     else:
         sender(destination, report)
     # Only acknowledge after delivery succeeds; failures retry next scheduled run.
