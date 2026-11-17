@@ -9,6 +9,8 @@
   "logging_api_url": "https://whatscripts.genricai.com/api/v1/credential-monitor/logs",
   "logging_api_token": "",
   "email": "",
+  "_slack_user_id_help": "Optional. To find your Slack member ID: open your Slack profile (click your picture) > click the three-dot More button > Copy member ID. Paste it into slack_user_id below (format like U01ABC234). Leave blank to disable tagging. Plain @username does not work.",
+  "slack_user_id": "",
   "slack_api_url": "https://whatscripts.genricai.com/api/v1/credential-monitor/slack",
   "slack_api_token": ""
 }

@@ -32,6 +32,7 @@ Edit `config.json` locally using a text editor:
 {
   "employee": "Your Name",
   "email": "employee@example.com",
+  "slack_user_id": "U01ABC234",
   "slack_api_url": "https://whatscripts.genricai.com/api/v1/credential-monitor/slack",
   "slack_api_token": "",
   "github_hosts": [],
@@ -50,7 +51,11 @@ either is missing, null, empty or whitespace-only. Surrounding whitespace is tri
 Run the scanner and installer as the employee so the detected username and
 inspected credential stores belong to that person.
 
-Set `email` to the employee's email address. Set `slack_api_token` to your
+Set `email` to the employee's email address. Optionally set `slack_user_id` to the
+employee's Slack member ID (Slack profile → ⋮ → Copy member ID); FAIL alerts then tag
+`<@ID>` on the first line. Passing and resolved messages never tag. Plain `@username`
+text cannot notify anyone, so only IDs (`U…`/`W…`) are accepted; an invalid value is a
+configuration error and blank disables tagging. Set `slack_api_token` to your
 `CREDENTIAL_MONITOR_SLACK_API_KEY`. Slack alerts POST a JSON body containing only
 `text` (a compact formatted summary) to `slack_api_url`, with bearer authentication.
 The process environment variable `CREDENTIAL_MONITOR_SLACK_API_KEY` overrides the

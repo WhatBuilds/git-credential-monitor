@@ -1,4 +1,5 @@
 """Shared Slack layout and API log text; no delivery or platform dependencies."""
+import re
 
 def slack_payload(report, resolved=False):
     """Build a bounded Block Kit report; dynamic values remain plain text."""
@@ -108,8 +109,15 @@ def report_log(report, resolved=False):
     return "\n\n".join(sections)
 
 
-def slack_summary(report, resolved=False):
-    """Compact mrkdwn text for the Slack relay; full detail stays in API logs."""
+SLACK_USER_ID = re.compile(r"[UW][A-Z0-9]{2,}")
+
+
+def slack_summary(report, resolved=False, slack_user_id=None):
+    """Compact mrkdwn text for the Slack relay; full detail stays in API logs.
+
+    A validated Slack member ID is tagged only on FAIL alerts (findings or
+    incomplete checks); pass and resolved messages never ping anyone.
+    """
     def text(value, limit=100):
         # Keep user-controlled values on one line and prevent Slack mentions/markup.
         value = " ".join(str(value).split())
@@ -127,7 +135,10 @@ def slack_summary(report, resolved=False):
         status = "✅ Findings cleared in configured checks"
     else:
         status = "✅ PASS — No findings in configured checks"
-    lines = [f"*GitHub credential monitor | {status}*",
+    failed = bool(findings or incomplete or report["coverage"] == "incomplete")
+    mention = (f"<@{slack_user_id}> " if failed and isinstance(slack_user_id, str)
+               and SLACK_USER_ID.fullmatch(slack_user_id) else "")
+    lines = [f"{mention}*GitHub credential monitor | {status}*",
              f"*Employee:* {text(report['employee'], 60)} • *Device:* {text(report['device'], 60)}"]
     if findings or incomplete:
         lines.append(f"*Summary:* {len(findings)} finding groups • {len(incomplete)} incomplete checks")
